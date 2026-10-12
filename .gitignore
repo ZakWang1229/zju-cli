@@ -1,0 +1,50 @@
+# Credentials and local configuration
+.env
+.env.*
+*.env
+!.env.example
+.secrets/
+credentials/
+
+# Python environments, caches, and build outputs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Private task state and downloaded course material
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+/jobs/
+/data/
+/downloads/
+/recordings/
+/output/
+*.m4a
+*.aac
+*.mp4
+*.mka
+*.ogg
+*.mp3
+*.wav
+/lesson.md
+/todos.json
+
+# Local editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zju-cli"
+version = "0.1.0"
+description = "CLI for Zhejiang University learning platform workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["zju", "cli", "courses"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.scripts]
+zju = "zju_cli.cli:main"
+
+[project.urls]
+Repository = "https://github.com/ZakWang1229/zju-cli"
+Issues = "https://github.com/ZakWang1229/zju-cli/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
