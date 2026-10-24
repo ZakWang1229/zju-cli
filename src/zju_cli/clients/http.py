@@ -18,7 +18,7 @@ class HttpSession:
         self.cookies = CookieJar()
         self.opener = build_opener(HTTPCookieProcessor(self.cookies))
 
-    def request(self, url: str, *, method="GET", data=None, headers=None):
+    def request(self, url: str, *, method="GET", data=None, headers=None, allowed_statuses=()):
         request_headers = {"User-Agent": UA, "Accept": "text/html,application/json,*/*"}
         request_headers.update(headers or {})
         request = Request(url, data=data, headers=request_headers, method=method)
@@ -28,6 +28,11 @@ class HttpSession:
                 return response.status, response.read(), response.geturl()
         except HTTPError as exc:
             code = exc.code
+            if code in allowed_statuses:
+                try:
+                    return code, exc.read(4 * 1024 * 1024), exc.geturl()
+                finally:
+                    exc.close()
             exc.close()
             if code in (401, 403):
                 raise SessionExpired(f"认证失效：{endpoint}（HTTP {code}）") from exc

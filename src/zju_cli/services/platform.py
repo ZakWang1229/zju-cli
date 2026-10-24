@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import time
-
-from ..clients.auth import CasAuth
 from ..config import Settings
 from ..errors import SessionExpired
+from ..clients.auth import CasAuth
 from .classroom import ClassroomService
 from .courses import CoursesService
 
@@ -23,11 +21,11 @@ class ZjuService:
 
     def _session(self, platform: str, *, force=False):
         cached = self._sessions.get(platform)
-        if not force and cached and time.monotonic() - cached[1] < self.settings.session_ttl_seconds:
-            return cached[0]
+        if not force and cached:
+            return cached
         self.on_progress(f"登录{'学在浙大' if platform == 'courses' else '智云课堂'} …")
         session = getattr(self.auth, platform)()
-        self._sessions[platform] = (session, time.monotonic())
+        self._sessions[platform] = session
         return session
 
     def _read(self, platform, operation):

@@ -5,6 +5,8 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
 
+from ..adapters.schedule import schedule
+from ..adapters.playback import playback_url
 from ..errors import InputError, RemoteError
 from ..files import output_path, staged_output
 from ..media import AUDIO_FORMATS, extract_audio
@@ -40,50 +42,11 @@ class ClassroomService:
             raise InputError("日期需为有效的 YYYY-MM-DD 格式") from exc
         if not 0 <= (end - start).days <= 6:
             raise InputError("end_date 不能早于 date，且单次最多查询 7 天")
-        def fetch(cmc):
-            session, user_id = cmc
-            query = urlencode({"user_id": user_id, "tenant_id": "112", "start_at": start.isoformat(), "end_at": end.isoformat()})
-            _, data = session.json(YJAPI + "/courseapi/v2/schedule/get-week-schedules?" + query)
-            result = data.get("result")
-            if not isinstance(result, dict):
-                raise RemoteError("课表接口未返回有效 result")
-            courses = []
-            for day in required_list(result, "list"):
-                for row in required_list(day, "course"):
-                    courses.append({"sub_id": row.get("id"), "course_id": row.get("course_id"),
-                                    "course_title": row.get("course_title") or "",
-                                    "teacher_name": row.get("teacher_name") or "", "room_name": row.get("room_name") or "",
-                                    "status_label": row.get("status_label") or "",
-                                    "start_at": shanghai_time(row.get("start_at")), "end_at": shanghai_time(row.get("end_at"))})
-            return {"range": str(start) if start == end else f"{start}~{end}", "count": len(courses), "courses": courses}
-        return self._read(fetch)
+        return self._read(lambda cmc: schedule(cmc, start, end))
 
     def playback_url(self, sub_id, course_id):
         sub_id, course_id = identifier(sub_id), identifier(course_id)
-        def fetch(cmc):
-            session, _ = cmc
-            _, data = session.json(YJAPI + "/courseapi/v2/course/catalogue?" + urlencode({"course_id": course_id}))
-            result = data.get("result")
-            payload = result.get("data") if isinstance(result, dict) else None
-            items = payload.get("item") if isinstance(payload, dict) else payload
-            if not isinstance(items, list):
-                raise RemoteError("回放目录接口格式异常")
-            item = next((row for row in items if isinstance(row, dict) and str(row.get("sub_id")) == sub_id), None)
-            if item is None:
-                raise RemoteError("未找到该节课的回放记录")
-            content = item.get("content")
-            if isinstance(content, str):
-                try:
-                    content = json.loads(content)
-                except ValueError as exc:
-                    raise RemoteError("回放内容格式异常") from exc
-            if not isinstance(content, dict):
-                raise RemoteError("该节课尚无回放内容")
-            url = (content.get("save_playback") or {}).get("contents") or (content.get("playback") or {}).get("url")
-            if not isinstance(url, str) or urlsplit(url).scheme not in {"http", "https"}:
-                raise RemoteError("该节课尚无有效回放链接")
-            return url
-        return self._read(fetch)
+        return self._read(lambda cmc: playback_url(cmc, sub_id, course_id))
 
     def audio(self, sub_id, course_id, out_path, *, overwrite=False, ffmpeg_bin=None, timeout=None,
               on_media_progress=None, should_stop=None):

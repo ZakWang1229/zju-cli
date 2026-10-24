@@ -9,6 +9,26 @@ from zju_cli.services.platform import ZjuService
 
 
 class CliTests(unittest.TestCase):
+    def test_autosign_local_status_and_stop_need_no_credentials_or_start(self):
+        for command in ("status","stop","list","history"):
+            with patch("zju_cli.cli.DaemonClient") as client, \
+                 patch("zju_cli.cli.Settings.load") as load, \
+                 patch("zju_cli.services.attendance.offline_view", return_value={"enabled":False}) as local, \
+                 patch("sys.stdout",io.StringIO()):
+                client.return_value.status.return_value={"running":False}
+                self.assertEqual(main(["autosign",command,"--json"]),0)
+                load.assert_not_called();client.return_value.call.assert_not_called()
+                self.assertEqual(local.call_args.args[0],command)
+
+    def test_autosign_answer_is_not_retried_and_invalid_date_rejected(self):
+        with patch("zju_cli.cli.Settings.load",return_value=__import__('zju_cli.config',fromlist=['Settings']).Settings("user","password")), \
+             patch("zju_cli.cli.DaemonClient") as client, patch("sys.stdout",io.StringIO()):
+            client.return_value.call.return_value={"state":"success"}
+            self.assertEqual(main(["autosign","answer","123","--code","0123","--json"]),0)
+            client.return_value.call.assert_called_once()
+        with patch("sys.stderr",io.StringIO()):
+            self.assertEqual(main(["autosign","history","--date","bad","--json"]),2)
+
     def test_transcript_command_is_removed(self):
         with patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit) as raised:

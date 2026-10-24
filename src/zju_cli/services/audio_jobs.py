@@ -35,8 +35,9 @@ def export_audio(source, target, *, overwrite=False, check_stop=None):
 
 
 class AudioJobService:
-    def __init__(self, store: JobStore):
+    def __init__(self, store: JobStore, *, create=None):
         self.store = store
+        self.create = create or store.create
 
     def submit(self, sub_id, course_id, out, *, settings, config_path=None, overwrite=False,
                ffmpeg_bin=None, timeout=None, launch=True):
@@ -52,18 +53,34 @@ class AudioJobService:
         if effective_config is None and (Path.cwd() / ".env").is_file():
             effective_config = Path.cwd() / ".env"
         job_id, now = uuid.uuid4().hex, time.time()
-        document = {"job_id": job_id, "kind": "class-audio", "status": "queued", "stage": "queued",
+        document = {"job_id": job_id, "kind": "class-audio", "task_type": "class-audio", "task_version": 1,
+                    "status": "queued", "stage": "queued",
                     "created_at": now, "updated_at": now, "sub_id": sub_id, "course_id": course_id,
                     "output_path": str(target), "overwrite": overwrite, "ffmpeg_bin": binary, "timeout": timeout,
                     "config_path": str(effective_config) if effective_config else None,
                     "username": settings.username, "http_timeout": settings.timeout_seconds,
                     "cancel_requested": False, "attempts": 0}
-        self.store.create(document)
+        document["parameters"] = {key: document[key] for key in (
+            "sub_id", "course_id", "output_path", "overwrite", "ffmpeg_bin", "timeout", "http_timeout")}
+        self.create(document)
         if launch:
             self.launch(job_id)
         return summary(self.store.get(job_id))
 
     def launch(self, job_id, *, config_path=None):
+        from ..session_daemon import DaemonClient
+        job = self.store.get(job_id)
+        effective_config = Path(config_path) if config_path is not None else (
+            Path(job["config_path"]) if job.get("config_path") else None)
+        settings = Settings.load(effective_config, job["http_timeout"], load_cwd=False)
+        if settings.username != job["username"]:
+            raise InputError("恢复配置与原任务账号不同")
+        DaemonClient(settings).call({"action": "job_resume", "data_dir": str(self.store.root.resolve()),
+                                    "job_id": job_id, "username": settings.username})
+
+    def _launch_legacy(self, job_id, *, config_path=None):
+        # Compatibility helper for exercising an existing Worker installation.
+        # New submissions and resumes always use launch(), the unified daemon.
         token = uuid.uuid4().hex
         self.store.reserve(job_id, token, changes={"config_path": str(config_path)} if config_path is not None else None)
         command = [sys.executable, "-m", "zju_cli.worker", job_id,

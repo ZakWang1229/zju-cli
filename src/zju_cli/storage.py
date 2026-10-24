@@ -22,7 +22,7 @@ def default_data_dir() -> Path:
 
 class JobStore:
     def __init__(self, root: Path):
-        self.root = root.expanduser().absolute()
+        self.root = Path(root).expanduser().absolute()
         try:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             with self.connection() as connection:
@@ -143,3 +143,14 @@ class JobStore:
                 document.update({"status": "cancelled", "stage": "finished", "completed_at": time.time()})
             self._write(connection, job_id, document)
         return self.get(job_id)
+
+    def pause_unleased(self, job_id):
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._row(connection, job_id)
+            if row["lease_until"] > time.time():
+                raise BusyError("任务由其他有效租约持有")
+            document = json.loads(row["document"])
+            if document["status"] not in TERMINAL:
+                document["status"] = "paused"
+                self._write(connection, job_id, document)

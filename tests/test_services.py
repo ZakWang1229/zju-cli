@@ -130,7 +130,7 @@ class ServiceTests(unittest.TestCase):
     def test_submit_has_exactly_one_post_and_confirms(self):
         self.session.json.side_effect = [(201, {"id": 10, "created_by_id": 7, "upload_url": "https://upload.example/file?token=secret"}),
                                          (200, {"message": "done"}), (200, {"list": [{"id": 100, "is_draft": False}]})]
-        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.services.courses.HttpSession") as uploader:
+        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.adapters.homework.HttpSession") as uploader:
             source = Path(directory) / "answer.txt"
             source.write_text("answer", encoding="utf-8")
             result = self.service.submit_homework("42", source)
@@ -145,7 +145,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_submit_timeout_never_replays_write(self):
         self.session.json.side_effect = [(201, {"id": 10, "upload_url": "https://upload.example/file"}), RemoteError("timeout")]
-        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.services.courses.HttpSession"):
+        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.adapters.homework.HttpSession"):
             source = Path(directory) / "answer.txt"
             source.write_text("answer")
             with self.assertRaisesRegex(RemoteError, "结果可能已生效"):

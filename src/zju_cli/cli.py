@@ -12,9 +12,10 @@ from . import __version__
 from .config import Settings
 from .errors import InputError, ZjuError
 from .output import emit, log
-from .services.platform import ZjuService
+from .remote_service import RemoteService as ZjuService
 from .services.audio_jobs import AudioJobService, summary
 from .storage import JobStore, TERMINAL, default_data_dir
+from .session_daemon import DaemonClient
 
 
 def common_options(parser, *, root=False):
@@ -33,6 +34,21 @@ def parser() -> argparse.ArgumentParser:
     shared = argparse.ArgumentParser(add_help=False)
     common_options(shared)
     commands = root.add_subparsers(dest="command", required=True)
+    session = commands.add_parser("daemon", aliases=["session"], parents=[shared], help="统一后台管理")
+    session.add_argument("session_command", choices=["status", "stop", "autostart"])
+    session.add_argument("autostart_action", nargs="?", choices=["enable", "disable", "status"], default="status")
+    autosign = commands.add_parser("autosign", parents=[shared], help="常驻自动签到（须显式开启）")
+    sign_commands = autosign.add_subparsers(dest="autosign_command", required=True)
+    sign_start = sign_commands.add_parser("start", parents=[shared])
+    sign_start.add_argument("--settings", type=Path, help="导入集中签到 JSON 配置")
+    sign_start.add_argument("--interval", type=float, help="每轮结束后的检查间隔秒数")
+    for name in ("stop", "status", "list", "discover"):
+        sign_commands.add_parser(name, parents=[shared])
+    sign_answer = sign_commands.add_parser("answer", parents=[shared])
+    sign_answer.add_argument("activity_id")
+    sign_answer.add_argument("--code", required=True)
+    sign_history = sign_commands.add_parser("history", parents=[shared])
+    sign_history.add_argument("--date", help="按北京时间 YYYY-MM-DD 筛选")
     commands.add_parser("todos", parents=[shared], help="列出未完成待办")
     courses = commands.add_parser("courses", parents=[shared], help="列出课程")
     courses.add_argument("--keyword", default="")
@@ -118,8 +134,14 @@ def run_audio(args):
     service = AudioJobService(store)
     if args.audio_command in {"submit", "extract"}:
         settings = Settings.load(args.config, args.http_timeout)
-        result = service.submit(args.sub_id, args.course_id, args.out, settings=settings,
-            config_path=args.config, overwrite=args.overwrite, ffmpeg_bin=args.ffmpeg_bin, timeout=args.timeout)
+        binary = args.ffmpeg_bin or settings.ffmpeg_bin
+        if os.path.dirname(binary):
+            binary = str(Path(binary).expanduser().resolve())
+        result = DaemonClient(settings).call({"action": "audio_submit", "data_dir": str(store.root.resolve()),
+            "username": settings.username, "timeout": settings.timeout_seconds,
+            "parameters": {"sub_id": args.sub_id, "course_id": args.course_id,
+                "out": str(args.out.expanduser().resolve()), "overwrite": args.overwrite,
+                "ffmpeg_bin": binary, "timeout": args.timeout}})
         if args.audio_command == "submit" or args.detach:
             return result
         if not args.quiet:
@@ -136,7 +158,13 @@ def run_audio(args):
     if args.job_command == "result":
         return service.result(args.job_id, out=args.out, overwrite=args.overwrite)
     if args.job_command == "resume":
-        return service.resume(args.job_id, config_path=args.config)
+        settings = Settings.load(args.config, args.http_timeout)
+        return summary(DaemonClient(settings).call({"action": "job_resume",
+            "data_dir": str(store.root.resolve()), "job_id": args.job_id, "username": settings.username}))
+    client = DaemonClient(Settings("", ""))
+    if client.status()["running"]:
+        return summary(client.call({"action": "job_cancel", "data_dir": str(store.root.resolve()),
+                                    "job_id": args.job_id}, start=False))
     return summary(store.cancel(args.job_id))
 
 
@@ -155,6 +183,14 @@ def confirm_write(args):
 
 def run(args):
     confirm_write(args)
+    if args.command == "autosign":
+        return run_autosign(args)
+    if args.command in {"daemon", "session"}:
+        if args.session_command == "autostart":
+            from .autostart import configure
+            return configure(args.autostart_action, config=args.config, timeout=args.http_timeout)
+        client = DaemonClient(Settings("", "", timeout_seconds=args.http_timeout or 30))
+        return client.status() if args.session_command == "status" else client.stop()
     if args.command == "class-audio":
         return run_audio(args)
     service = ZjuService(Settings.load(args.config, args.http_timeout), on_progress=None if args.quiet else log)
@@ -171,6 +207,43 @@ def run(args):
     if args.command == "schedule":
         return service.schedule(args.date, args.end_date)
     raise InputError("未知命令")
+
+
+def run_autosign(args):
+    command = args.autosign_command
+    parameters = {}
+    if command == "history" and args.date:
+        from datetime import date
+        try:
+            if date.fromisoformat(args.date).isoformat() != args.date:
+                raise ValueError
+        except ValueError as exc:
+            raise InputError("日期格式应为 YYYY-MM-DD") from exc
+        parameters["date"] = args.date
+    if command == "answer":
+        parameters.update(activity_id=args.activity_id, code=args.code)
+    if command == "start" and (args.settings is not None or args.interval is not None):
+        from .services.attendance_config import validate_config
+        value = {}
+        if args.settings:
+            try:
+                value = json.loads(args.settings.expanduser().resolve().read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError) as exc:
+                raise InputError("无法读取签到 JSON 配置") from exc
+        if args.interval is not None:
+            if not isinstance(value,dict):
+                raise InputError("签到配置必须为 JSON 对象")
+            value["interval"] = args.interval
+        validate_config(value)
+        parameters["config"] = value
+    read_only = command in {"status", "list", "history", "stop"}
+    settings = Settings("", "") if read_only else Settings.load(args.config, args.http_timeout)
+    client = DaemonClient(settings)
+    if read_only and not client.status()["running"]:
+        from .services.attendance import offline_view
+        return offline_view(command, parameters)
+    return client.call({"action": "autosign", "command": command,
+        "parameters": parameters, "username": None if read_only else settings.username}, start=not read_only)
 
 
 def main(argv=None) -> int:

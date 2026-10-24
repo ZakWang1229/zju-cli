@@ -31,6 +31,12 @@ class AudioJobTests(unittest.TestCase):
         self.platform = Mock()
         self.platform.audio.side_effect = self.extract
 
+    def backend_submit(self, message):
+        self.assertEqual(message["action"], "audio_submit")
+        self.assertEqual(message["username"], self.settings.username)
+        self.assertTrue(Path(message["parameters"]["out"]).is_absolute())
+        return self.service.submit(**message["parameters"], settings=self.settings, launch=False)
+
     def tearDown(self):
         self.temporary.cleanup()
 
@@ -102,13 +108,22 @@ class AudioJobTests(unittest.TestCase):
         with patch("zju_cli.services.audio_jobs.Settings.load", return_value=self.settings), \
              patch("zju_cli.services.audio_jobs.subprocess.Popen") as spawn:
             spawn.return_value.pid = 123
-            self.service.resume(job_id)
+            self.service._launch_legacy(job_id)
         token = spawn.call_args.args[0][-1]
         self.platform.audio.side_effect = self.extract
         self.worker(job_id, token=token).run()
         self.assertEqual(self.store.get(job_id)["attempts"], 2)
         self.assertEqual(self.store.get(job_id)["status"], "succeeded")
         self.assertEqual(len(self.store.list()), 1)
+
+    def test_default_submit_uses_unified_daemon(self):
+        with patch("zju_cli.services.audio_jobs.Settings.load", return_value=self.settings), \
+             patch("zju_cli.session_daemon.DaemonClient") as client:
+            result = self.service.submit("42", "1", self.target, settings=self.settings)
+        request = client.return_value.call.call_args.args[0]
+        self.assertEqual(request["action"], "job_resume")
+        self.assertEqual(request["job_id"], result["job_id"])
+        self.assertFalse(self.store.get(result["job_id"])["worker_active"])
 
     def test_completed_internal_audio_is_reused_after_worker_crash(self):
         job_id = self.create()
@@ -159,7 +174,7 @@ class AudioJobTests(unittest.TestCase):
         job_id = self.create()
         with patch("zju_cli.services.audio_jobs.subprocess.Popen", side_effect=OSError("spawn failed")):
             with self.assertRaisesRegex(LocalFileError, job_id):
-                self.service.launch(job_id)
+                self.service._launch_legacy(job_id)
         self.assertEqual(self.store.get(job_id)["status"], "paused")
         self.assertFalse(self.store.get(job_id)["worker_active"])
 
@@ -199,13 +214,14 @@ class AudioJobTests(unittest.TestCase):
             with self.subTest(command=command):
                 output = io.StringIO()
                 with patch("sys.stdout", output), patch("zju_cli.cli.Settings.load", return_value=self.settings), \
-                     patch("zju_cli.services.audio_jobs.AudioJobService.launch") as launch, \
+                     patch("zju_cli.cli.DaemonClient.call", side_effect=self.backend_submit) as launch, \
                      patch("zju_cli.cli.wait_audio_job") as wait:
                     code = main(["class-audio", command, "--sub-id", "42", "--course-id", "1", "--out",
                                  str(self.target), "--data-dir", str(self.store.root), "--json", *options])
                 self.assertEqual(code, 0)
                 job_id = json.loads(output.getvalue())["job_id"]
-                launch.assert_called_once_with(job_id)
+                self.assertEqual(launch.call_count, 1)
+                self.assertEqual(launch.call_args.args[0]["data_dir"], str(self.store.root.resolve()))
                 wait.assert_not_called()
                 self.assertEqual(self.store.get(job_id)["status"], "queued")
 
@@ -214,7 +230,7 @@ class AudioJobTests(unittest.TestCase):
         expected = {"ok": True, "out_path": str(self.target), "bytes": 10}
         with patch("sys.stdout", output), patch("sys.stderr", io.StringIO()), \
              patch("zju_cli.cli.Settings.load", return_value=self.settings), \
-             patch("zju_cli.services.audio_jobs.AudioJobService.launch"), \
+             patch("zju_cli.cli.DaemonClient.call", side_effect=self.backend_submit), \
              patch("zju_cli.cli.wait_audio_job", return_value=(expected, 0)) as wait:
             code = main(["class-audio", "extract", "--sub-id", "42", "--course-id", "1", "--out",
                          str(self.target), "--data-dir", str(self.store.root), "--json"])
@@ -226,7 +242,7 @@ class AudioJobTests(unittest.TestCase):
 
     def test_wait_ctrl_c_keeps_submitted_task(self):
         with patch("sys.stderr", io.StringIO()), patch("zju_cli.cli.Settings.load", return_value=self.settings), \
-             patch("zju_cli.services.audio_jobs.AudioJobService.launch"), \
+             patch("zju_cli.cli.DaemonClient.call", side_effect=self.backend_submit), \
              patch("zju_cli.cli.wait_audio_job", side_effect=KeyboardInterrupt):
             code = main(["class-audio", "extract", "--sub-id", "42", "--course-id", "1", "--out",
                          str(self.target), "--data-dir", str(self.store.root)])
@@ -288,7 +304,8 @@ class AudioJobTests(unittest.TestCase):
         try:
             with patch.dict(os.environ, {"ZJU_USER": "test-user", "ZJU_PASS": "test-password"}), \
                  patch("zju_cli.services.audio_jobs.subprocess.Popen", side_effect=spawn):
-                submitted = self.service.submit("42", "1", self.target, settings=self.settings)
+                submitted = self.service.submit("42", "1", self.target, settings=self.settings, launch=False)
+                self.service._launch_legacy(submitted["job_id"])
             job_id = submitted["job_id"]
             self.assertTrue(request_started.wait(10), "worker did not start ffmpeg")
             result, code = wait_audio_job(self.store, job_id, argparse.Namespace(wait_timeout=0.05, quiet=True))

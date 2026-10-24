@@ -47,12 +47,17 @@ def encrypt_password(password: str, modulus: str, exponent: str) -> str:
 class CasAuth:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._session = None
 
     def login(self, landing_url: str) -> HttpSession:
-        session = HttpSession(self.settings.timeout_seconds)
+        if self._session is None:
+            self._session = HttpSession(self.settings.timeout_seconds)
+        session = self._session
         _, raw, landing_url = session.request(landing_url)
         if urlsplit(landing_url).hostname != "zjuam.zju.edu.cn":
-            raise AuthenticationError("未跳转到浙大 CAS 登录页")
+            # An existing CAS SSO cookie can issue a new service ticket and
+            # return directly to the application without a password form.
+            return session
         parser = CasFormParser()
         parser.feed(raw.decode("utf-8", errors="replace"))
         form = parser.login_form()

@@ -1,0 +1,12 @@
+{
+  "interval": 4,
+  "desktop": true,
+  "notification_timeout": 5,
+  "radar": {
+    "location": [120.089136, 30.302331],
+    "candidates": [[120.085042, 30.30173], [120.077135, 30.305142]],
+    "estimate": true,
+    "max_attempts": 14
+  },
+  "dingtalk": null
+}
