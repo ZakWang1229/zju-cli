@@ -1,19 +1,44 @@
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from zju_cli.adapters.attendance import AttendanceAdapter
-from zju_cli.config import Settings
-from zju_cli.errors import AuthenticationError, ConfigError, InputError, RemoteError, SessionExpired
-from zju_cli.job_manager import JobManager, JobRecords
-from zju_cli.scheduler import NextRun, PeriodicScheduler
-from zju_cli.services.attendance import AttendanceService, offline_view
-from zju_cli.services.attendance_config import distance, estimate_position, validate_config
-from zju_cli.services.attendance_notifications import AttendanceNotifications
-from test_scheduler import ManualExecutor
+from zju_cli.backend.modules.courses import AttendanceAdapter
+from zju_cli.shared.config import Settings
+from zju_cli.shared.errors import AuthenticationError, ConfigError, InputError, RemoteError, SessionExpired
+from zju_cli.backend.command_registry import CommandRegistry
+from zju_cli.backend.modules.schedules import SchedulesModule
+from zju_cli.backend.modules.tasks import TasksModule
+from zju_cli.backend.modules.autosign import NextRun
+from zju_cli.shared.records import RecordStore as JobRecords
+from zju_cli.backend.modules.autosign import AttendanceService, AttendanceNotifications
+from zju_cli.shared.attendance_state import offline_view
+from zju_cli.shared.attendance_config import distance, estimate_position, validate_config
+
+
+class AttendanceRuntime(CommandRegistry):
+    def __init__(self, root):
+        super().__init__()
+        self.command_registry = self
+        self.state_dir = Path(root)
+        self.config = Settings("account", "test-password")
+        self.tasks = TasksModule(self, self.config)
+        self.schedules = SchedulesModule(self, self.config)
+        self.service = None
+        self.register("autosign.check", self.check, mode="job", durable=True,
+                      resumable=True, internal_only=True)
+
+    def check(self):
+        result = self.service.check()
+        self.schedules.set_next_delay("autosign", result.delay)
+        return {"delay": result.delay}
+
+    def close(self):
+        self.schedules.close()
+        self.tasks.close()
 
 
 def activity(activity_id="1", **changes):
@@ -26,8 +51,8 @@ class AttendanceTests(unittest.TestCase):
         self.temporary=tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.database=Path(self.temporary.name)/"scheduler.sqlite3"
-        self.jobs=JobManager(periodic_database=self.database)
-        self.addCleanup(self.jobs.close)
+        self.runtime=AttendanceRuntime(self.temporary.name)
+        self.addCleanup(self.runtime.close)
         self.adapter=Mock()
         self.adapter.activities.return_value=[]
         self.adapter.code.return_value=None
@@ -35,12 +60,12 @@ class AttendanceTests(unittest.TestCase):
         self.adapter.number.return_value={"confirmed":True}
         self.factory=Mock(return_value=self.adapter)
         self.notifications=Mock()
-        self.service=AttendanceService(self.jobs,"account",self.factory,notifications=self.notifications)
-        self.jobs.register_periodic("autosign",self.service.check,read_only=False)
+        self.service=AttendanceService(self.runtime,"account",self.factory,notifications=self.notifications)
+        self.runtime.service=self.service
         self.service.restore()
 
     def state(self, key="1"):
-        return self.jobs.records.get(self.service.namespace,key)
+        return self.service.records.get(self.service.namespace,key)
 
     def test_disabled_and_read_only_discovery_never_write(self):
         self.adapter.activities.return_value=[activity()]
@@ -70,7 +95,7 @@ class AttendanceTests(unittest.TestCase):
         self.assertEqual(self.service.history("2000-01-01")["query_count"],2)
         self.service.stop();self.service.start()
         self.assertEqual(self.service.history()["query_count"],2)
-        restarted=AttendanceService(self.jobs,"account",self.factory)
+        restarted=AttendanceService(self.runtime,"account",self.factory)
         self.assertEqual(restarted.history()["query_count"],0)
 
     def test_platform_existing_expired_ended_and_unknown(self):
@@ -135,41 +160,46 @@ class AttendanceTests(unittest.TestCase):
         self.adapter.confirmed.side_effect=RemoteError("offline")
         self.service.start();self.service.check()
         self.assertEqual(self.state()["state"],"pending_verification")
-        self.jobs.close()
-        jobs=JobManager(periodic_database=self.database)
-        self.addCleanup(jobs.close)
-        restored=AttendanceService(jobs,"account",self.factory)
-        jobs.register_periodic("autosign",restored.check,read_only=False);restored.restore()
+        self.runtime.close()
+        runtime=AttendanceRuntime(self.temporary.name)
+        self.addCleanup(runtime.close)
+        restored=AttendanceService(runtime,"account",self.factory)
+        runtime.service=restored;restored.restore()
         restored.check()
         self.adapter.number.assert_called_once()
         self.assertEqual(restored.activities()["activities"][0]["state"],"pending_verification")
 
     def test_crash_after_intent_only_verifies(self):
-        self.jobs.records.put(self.service.namespace,"1",{"activity_id":"1","course":"c","title":"t",
+        self.service.records.put(self.service.namespace,"1",{"activity_id":"1","course":"c","title":"t",
             "type":"number","state":"processing"})
         self.adapter.activities.return_value=[activity()]
         self.service.start();self.service.check()
         self.adapter.number.assert_not_called()
         self.assertEqual(self.state()["state"],"pending_verification")
 
-    def test_backoff_and_recovery_use_controlled_clock(self):
-        now=[0]
-        scheduler=self.jobs.periodic
-        scheduler.clock=lambda:now[0]
-        scheduler.executor.shutdown()
-        scheduler.executor=ManualExecutor()
+    def test_backoff_and_recovery_use_unified_scheduler(self):
         self.adapter.activities.side_effect=RemoteError("token=must-not-appear")
         self.service.start()
+        scheduler=self.runtime.schedules
+        def run_round(delay):
+            scheduler._rows["autosign"]["next_run_at"] = 0
+            scheduler.tick()
+            task_id = scheduler.get("autosign")["current_task_id"]
+            self.assertIsNotNone(task_id)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if self.runtime.tasks.get(task_id)["state"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(self.runtime.tasks.get(task_id)["state"], "succeeded")
+            scheduler.tick()
+            row = scheduler.get("autosign")
+            self.assertEqual(row["last_result"]["delay"], delay)
+            self.assertLessEqual(abs(row["next_run_at"] - time.time() - delay), 1)
         for delay in (4,8,16,32,60,60):
-            now[0]=scheduler.status("autosign")["next_run"]
-            scheduler.tick();scheduler.tick()
-            self.assertEqual(len(scheduler.executor.pending),1)
-            scheduler.executor.finish()
-            self.assertEqual(scheduler.status("autosign")["next_run"],now[0]+delay)
+            run_round(delay)
         self.adapter.activities.side_effect=None
-        now[0]=scheduler.status("autosign")["next_run"]
-        scheduler.tick();scheduler.executor.finish()
-        self.assertEqual(scheduler.status("autosign")["next_run"],now[0]+4)
+        run_round(4)
         self.assertEqual(self.service.status()["failures"],0)
         self.assertNotIn("must-not-appear",self.database.read_bytes().decode(errors="ignore"))
 
@@ -223,7 +253,7 @@ class AttendanceTests(unittest.TestCase):
         self.service.start({"interval":8})
         self.assertEqual(self.service.config["radar"]["location"],[120,30])
         self.assertFalse(self.service.config["desktop"])
-        self.jobs.records.put("autosign:other","1",{"state":"success"})
+        self.service.records.put("autosign:other","1",{"state":"success"})
         self.assertEqual(self.service.activities()["activities"],[])
 
     def test_accepted_start_cannot_reopen_a_shutting_down_daemon(self):
@@ -270,18 +300,30 @@ class AttendanceTests(unittest.TestCase):
 
     def test_restart_enabled_then_explicit_stop_stays_disabled(self):
         self.service.start();self.service.start()
-        self.assertEqual(len(self.jobs.periodic.tasks),1)
-        self.service.shutdown();self.jobs.close()
-        jobs=JobManager(periodic_database=self.database);self.addCleanup(jobs.close)
-        restored=AttendanceService(jobs,"account",self.factory)
-        jobs.register_periodic("autosign",restored.check,read_only=False);restored.restore()
+        self.assertEqual(len(self.runtime.schedules.list()),1)
+        self.service.shutdown();self.runtime.close()
+        runtime=AttendanceRuntime(self.temporary.name);self.addCleanup(runtime.close)
+        restored=AttendanceService(runtime,"account",self.factory)
+        runtime.service=restored;restored.restore()
         self.assertTrue(restored.status()["enabled"])
-        restored.stop();jobs.close()
-        jobs2=JobManager(periodic_database=self.database);self.addCleanup(jobs2.close)
-        stopped=AttendanceService(jobs2,"account",self.factory)
-        jobs2.register_periodic("autosign",stopped.check,read_only=False);stopped.restore()
+        restored.stop();runtime.close()
+        runtime2=AttendanceRuntime(self.temporary.name);self.addCleanup(runtime2.close)
+        stopped=AttendanceService(runtime2,"account",self.factory)
+        runtime2.service=stopped;stopped.restore()
         self.assertFalse(stopped.status()["enabled"])
-        self.assertFalse(jobs2.periodic_status("autosign")["enabled"])
+        self.assertFalse(runtime2.schedules.get("autosign")["enabled"])
+
+    def test_schedule_is_the_only_autosign_enabled_state(self):
+        self.service.start()
+        self.service.stop()
+        control = self.service.records.get(self.service.namespace, "control")
+        self.assertNotIn("enabled", control)
+        self.assertFalse(self.service.status()["enabled"])
+
+        self.runtime.schedules.enable("autosign")
+        self.assertTrue(self.service.status()["enabled"])
+        self.service.check()
+        self.assertEqual(self.service.history()["query_count"], 1)
 
     def test_notification_failure_does_not_change_completed_attendance(self):
         self.notifications.publish.side_effect=RuntimeError("token=secret")
@@ -294,8 +336,9 @@ class AttendanceTests(unittest.TestCase):
     def test_offline_status_history_and_stop(self):
         self.service.start()
         self.adapter.activities.return_value=[activity(status="on_call_fine")]
-        self.service.check();self.jobs.close()
-        with patch("zju_cli.runtime.runtime_dir",return_value=Path(self.temporary.name)):
+        self.service.check();self.runtime.close()
+        with patch("zju_cli.shared.runtime.runtime_dir",return_value=Path(self.temporary.name)), \
+             patch("zju_cli.shared.storage.default_data_dir",return_value=Path(self.temporary.name)):
             self.assertTrue(offline_view("status")["enabled"])
             self.assertEqual(len(offline_view("history")["events"]),1)
             self.assertEqual(offline_view("history",{"date":"2000-01-01"}),{"query_count":0,"events":[]})
@@ -357,7 +400,7 @@ class NotificationTests(unittest.TestCase):
             notifier=AttendanceNotifications(records,"n",Path(temporary),lambda:config,desktop=desktop,ding=ding)
             notice={"event_id":"one","message":"签到完成"}
             try:
-                with patch("zju_cli.services.attendance_notifications.os.name","nt"):
+                with patch("zju_cli.backend.modules.autosign.os.name","nt"):
                     notifier.publish([notice]);notifier.queue.join()
                     notifier.publish([notice]);notifier.queue.join()
                 desktop.assert_called_once();ding.assert_called_once()
@@ -371,7 +414,7 @@ class NotificationTests(unittest.TestCase):
             desktop=Mock()
             notifier=AttendanceNotifications(records,"n",Path(temporary),lambda:validate_config(),desktop=desktop)
             try:
-                with patch("zju_cli.services.attendance_notifications.os.name","posix"):
+                with patch("zju_cli.backend.modules.autosign.os.name","posix"):
                     notifier.publish([{"event_id":"one","message":"需要输入"}]);notifier.queue.join()
                 desktop.assert_not_called()
                 self.assertTrue(records.get("n:notifications","one")["attempted"])

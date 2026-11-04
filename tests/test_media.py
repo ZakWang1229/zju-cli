@@ -8,8 +8,8 @@ import wave
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from zju_cli.errors import CancelledError, LocalFileError
-from zju_cli.media import extract_audio
+from zju_cli.shared.errors import CancelledError, LocalFileError
+from zju_cli.backend.modules.classroom import extract_audio
 
 
 class MediaTests(unittest.TestCase):
@@ -31,8 +31,8 @@ class MediaTests(unittest.TestCase):
         process = Mock()
         process.stdout = io.StringIO()
         process.poll.return_value = None
-        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.media.subprocess.Popen", return_value=process), \
-             patch("zju_cli.media.time.monotonic", side_effect=[0, 2]):
+        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.backend.modules.classroom.subprocess.Popen", return_value=process), \
+             patch("zju_cli.backend.modules.classroom.time.monotonic", side_effect=[0, 2]):
             with self.assertRaisesRegex(LocalFileError, "超过"):
                 extract_audio("https://example/video", Path(directory) / "output.m4a", timeout=1)
         process.terminate.assert_called_once()
@@ -42,8 +42,8 @@ class MediaTests(unittest.TestCase):
         process = Mock()
         process.stdout = io.StringIO()
         process.poll.return_value = None
-        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.media.subprocess.Popen", return_value=process), \
-             patch("zju_cli.media.queue.Queue") as event_queue:
+        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.backend.modules.classroom.subprocess.Popen", return_value=process), \
+             patch("zju_cli.backend.modules.classroom.queue.Queue") as event_queue:
             event_queue.return_value.get.side_effect = KeyboardInterrupt
             with self.assertRaises(KeyboardInterrupt):
                 extract_audio("https://example/video", Path(directory) / "output.m4a")
@@ -53,7 +53,7 @@ class MediaTests(unittest.TestCase):
         process = Mock()
         process.stdout = io.StringIO()
         process.poll.return_value = None
-        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.media.subprocess.Popen", return_value=process):
+        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.backend.modules.classroom.subprocess.Popen", return_value=process):
             with self.assertRaises(CancelledError):
                 extract_audio("https://example/video", Path(directory) / "output.m4a", should_stop=lambda: True)
         process.terminate.assert_called_once()
@@ -65,7 +65,7 @@ class MediaTests(unittest.TestCase):
         process.stdout = io.StringIO()
         process.poll.return_value = None
         with tempfile.TemporaryDirectory() as directory, \
-             patch("zju_cli.media.subprocess.Popen", return_value=process) as spawn:
+             patch("zju_cli.backend.modules.classroom.subprocess.Popen", return_value=process) as spawn:
             with self.assertRaises(CancelledError):
                 extract_audio("https://example/video", Path(directory) / "output.m4a", should_stop=lambda: True)
         self.assertEqual(spawn.call_args.kwargs["creationflags"], subprocess.CREATE_NO_WINDOW)

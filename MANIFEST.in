@@ -1,2 +1,7 @@
 include README.md
 include .env.example
+include LICENSE-cc98-mcp
+include LICENSE-CC98-CLI
+include DAEMON_DESIGN.md
+include MODULE_SPEC.md
+recursive-include deploy *.service

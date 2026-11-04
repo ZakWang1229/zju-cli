@@ -1,0 +1,17 @@
+[Unit]
+Description=ZJU CLI daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=ZJU_LOG_OUTPUT=stderr
+ExecStart=%h/.local/bin/zju --config %h/.config/zju-cli/.env daemon run
+Restart=on-failure
+TimeoutStopSec=120
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

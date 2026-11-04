@@ -2,11 +2,11 @@ from http.cookiejar import Cookie
 import unittest
 from unittest.mock import patch
 
-from zju_cli.auth_manager import AuthManager, is_cas_cookie
-from zju_cli.clients.http import HttpSession
-from zju_cli.clients.auth import COURSES, TGMEDIA
-from zju_cli.config import Settings
-from zju_cli.errors import AuthenticationError, RemoteError
+from zju_cli.backend.modules.zjuam import AuthManager, is_cas_cookie
+from zju_cli.shared.http import HttpSession
+from zju_cli.backend.modules.zjuam import COURSES, TGMEDIA
+from zju_cli.shared.config import Settings
+from zju_cli.shared.errors import AuthenticationError, RemoteError
 
 
 def cookie(domain, path="/", name="CASTGC"):
@@ -66,7 +66,7 @@ class AuthManagerTests(unittest.TestCase):
                 self._session.cookies.set_cookie(cookie(".zju.edu.cn"))
                 self._session.cookies.set_cookie(cookie("courses.zju.edu.cn", name="site"))
                 return self._session
-        with patch("zju_cli.auth_manager.CasAuth", FakeAuth):
+        with patch("zju_cli.backend.modules.zjuam.CasAuth", FakeAuth):
             first = manager.courses()
             second = manager.courses()
         self.assertIsNot(first.cookies, second.cookies)
@@ -76,7 +76,7 @@ class AuthManagerTests(unittest.TestCase):
     def test_only_authentication_failure_has_cooldown(self):
         now = [0]
         manager = AuthManager(Settings("student", "password"), clock=lambda: now[0])
-        with patch("zju_cli.auth_manager.CasAuth.courses", side_effect=[RemoteError("network"),
+        with patch("zju_cli.backend.modules.zjuam.CasAuth.courses", side_effect=[RemoteError("network"),
                 AuthenticationError("credentials"), HttpSession()]) as authenticate:
             with self.assertRaises(RemoteError):
                 manager.courses()

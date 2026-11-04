@@ -20,7 +20,7 @@ zju autosign stop                            # 持久禁用
 
 活动状态包含 `discovered`、`processing`、`waiting_input`、`pending_verification`、`success`、`ended`。只有明确成功响应或读回确认成功才记为完成，来源 `platform_existing` 表示平台已有完成状态，`tool` 表示本工具提交后确认。响应丢失或崩溃后的 `processing/pending_verification` 只核实，不自动重提。停止后不再发起新提交，已发出的提交完成核实后退出。
 
-状态固定存于用户私有后台运行目录的 `scheduler.sqlite3`，按账号与活动 ID 去重；按北京时间导出 `autosign-YYYY-MM-DD.jsonl`。数据库是来源，导出失败可在后续检查或后台启动时补写；日志、通知失败不会触发再次签到。完成记录不含签到码、精确位置或原始响应。Windows 默认尝试桌面通知，不可用则保留本地记录；其他系统只保留本地日志。可将 `desktop` 设为 false。钉钉默认禁用，需在 JSON 配置中提供 `dingtalk: {"webhook": "https://oapi.dingtalk.com/robot/send?access_token=...", "secret": "可选加签密钥"}`；请保护该配置文件。通知在独立有界队列内执行，超时由 `notification_timeout` 控制（最多 30 秒）。
+状态存于用户私有状态目录的 `scheduler.sqlite3`，按账号与活动 ID 去重；按北京时间导出 `autosign-YYYY-MM-DD.jsonl`。数据库是来源，导出失败可在后续检查或后台启动时补写；日志、通知失败不会触发再次签到。完成记录不含签到码、精确位置或原始响应。Windows 默认尝试桌面通知，不可用则保留本地记录；其他系统只保留本地日志。可将 `desktop` 设为 false。钉钉默认禁用，需在 JSON 配置中提供 `dingtalk: {"webhook": "https://oapi.dingtalk.com/robot/send?access_token=...", "secret": "可选加签密钥"}`；请保护该配置文件。通知在独立有界队列内执行，超时由 `notification_timeout` 控制（最多 30 秒）。
 
 `autosign status` 的 `running` 表示当前是否在检查或处理输入；后台离线时启用意图仍可为 true，下次后台启动恢复。该功能不占音频下载并发槽位。
 
@@ -35,7 +35,7 @@ Windows 登录自启动统一后台：`zju daemon autostart enable`。
 
 浙江大学「学在浙大 / 智云课堂」命令行工具：查询待办、课程、作业和课表，提取回放音频。
 
-使用 Python 标准库实现，无第三方 Python 运行时依赖。支持 JSON 输出和持久化后台音频任务，适用于终端、脚本及 Agent。
+基于 Python 3.11+，依赖 httpx、cryptography，Windows 另安装 tzdata。支持 JSON 输出、模块化 daemon、统一任务队列、课程资料同步和 CC98 查询。
 
 | 功能 | 命令 |
 | --- | --- |
@@ -43,7 +43,10 @@ Windows 登录自启动统一后台：`zju daemon autostart enable`。
 | 作业详情、提交与撤回 | `homework list / submit / retract` |
 | 智云课表 | `schedule` |
 | 回放音频与后台任务 | `class-audio extract / submit / jobs` |
-| 统一后台 | `daemon status / stop`（`session` 为别名） |
+| 统一后台 | `daemon status / start / restart / stop / run`（`session` 为别名） |
+| 后台接口 | `command list`、`task submit / get / wait / list / cancel / resume`、`schedules create / get / list / enable / disable / delete` |
+| 课程资料 | `materials list / download / sync` |
+| CC98 论坛 | `cc98 search / posts / hot / new / boards / board / user / image / download / status` |
 
 本项目为非官方工具，暂不提供 MCP 服务。登录与平台接口实现参考了 EviterLesRoses2 的 [vibe-learning-in-zju](https://github.com/EviterLesRoses2/vibe-learning-in-zju)。
 
@@ -164,11 +167,11 @@ zju schedule --date 2026-10-04 --end-date 2026-10-10 --json
 zju class-audio extract --sub-id 12345 --course-id 67890 --out ./lesson.m4a
 ```
 
-`extract` 创建任务，由统一后台管理的任务线程登录和提取音频（全局最多并发 2 个），前台等待最终结果。成功退出表示音频已提取并输出。
+`extract` 创建持久任务，与普通请求共用四线程、十六个排队槽位的任务队列，前台轮询等待最终结果。成功退出表示音频已提取并输出。
 
 ### 后台任务
 
-`submit` 立即返回 `job_id`，后台继续提取。`extract --detach` 是等价入口，提交成功仅表示任务已创建。
+`submit` 立即返回 `task_id` 和兼容字段 `job_id`，后台继续提取。`extract --detach` 是等价入口，提交成功仅表示任务已创建。
 
 ```sh
 zju class-audio submit --sub-id 12345 --course-id 67890 --out ./lesson.m4a --json
@@ -184,7 +187,7 @@ zju class-audio jobs wait $jobId --wait-timeout 20 --json
 zju class-audio jobs result $jobId --json
 ```
 
-`status` 和 `list` 显示阶段、已用时间、实际媒体位置和错误。`list`、`status`、`wait`、`result`、`cancel` 均不要求账号凭据。
+`status` 和 `list` 显示状态、阶段、媒体进度和错误。查询及读取已有结果不需要账号凭据。取消与运行中等待连接已有后台；恢复或另存结果在后台未启动时需加载配置。
 
 脚本和 Agent 建议使用后台提交加短等待。**退出码 `7` 仅表示本次等待超时，任务仍在运行；请继续查询原任务，避免重新提交。** Ctrl-C 也只停止前台等待。
 
@@ -194,7 +197,7 @@ zju class-audio jobs result $jobId --json
 | `--timeout` | 本次 ffmpeg 运行时间 | 不限 |
 | `--http-timeout` | 单次登录或接口请求时间 | 30 秒 |
 
-以上时间单位均为秒。等待期间约每 5 秒向 stderr 输出进度；等待超时不会主动唤醒 Agent。
+以上时间单位均为秒。等待超时仅结束本次等待，任务继续运行，可查询相同 ID。
 
 ### 取消、恢复与导出
 
@@ -206,11 +209,11 @@ zju class-audio jobs result $jobId --out ./recovered.m4a --json
 ```
 
 - **取消**：后台任务检查取消请求，停止 ffmpeg 并清理临时输出。登录期间需等待当前 HTTP 操作返回；临近完成时请以最终状态为准。
-- **恢复**：电脑重启或后台崩溃后，使用原 ID 恢复。旧租约最多需等 60 秒过期；成功或已取消的任务不能恢复。
+- **恢复**：电脑重启或后台崩溃后，使用原 ID 恢复。任务只恢复 `interrupted` 状态，成功或已取消的任务不能恢复。
 - **重新提取**：恢复未完成的下载时会重新登录，从头提取。已完整保存的内部音频会直接复用。
 - **导出**：复用已完成的内部音频，无需重新下载。导出文件的扩展名须与原音频一致。
 
-任务状态为 `queued`、`running`、`paused`、`succeeded`、`failed` 或 `cancelled`。运行后台任务期间，电脑需保持开机。
+任务状态为 `queued`、`running`、`interrupted`、`succeeded`、`failed` 或 `cancelled`。任务是唯一状态来源；运行后台任务期间，电脑需保持开机。
 
 ### 存储
 
@@ -219,19 +222,20 @@ zju class-audio jobs result $jobId --out ./recovered.m4a --json
 | Windows | `%LOCALAPPDATA%\zju-cli` |
 | Linux / macOS | `$XDG_STATE_HOME/zju-cli`，未设置时为 `~/.local/state/zju-cli` |
 
-可通过 `--data-dir` 或 `ZJU_DATA_DIR` 修改目录；提交、查询和恢复需使用同一目录。
+新任务与计划的元数据统一保存在后台状态目录。音频 `--data-dir` / `ZJU_DATA_DIR` 可指定产物目录，也用于查找旧版任务；新 task 的产物路径记录在任务元数据中。
 
 ```text
 zju-cli/
-  jobs.sqlite3
-  jobs/<job-id>/
+  tasks.sqlite3
+  scheduler.sqlite3
+  tasks/<task-id>/
     audio.m4a
-    worker.log
+  logs/daemon-YYYY-MM-DD.log
 ```
 
 任务目录会保留一份完整音频，额外占用一份录音的磁盘空间。若目标文件在下载期间被其他程序创建，默认保留已有文件，结果包含 `output_error`；可用 `jobs result --out` 导出到新路径。
 
-数据库保存任务类型、版本、参数和账号标识，不保存密码、Cookie 或回放签名 URL。后台使用启动时的主账号凭据；修改密码后停止并重新启动。旧任务记录及其结果文件继续可读。
+数据库保存任务类型、版本、参数和账号标识，不保存密码、Cookie 或回放签名 URL。后台使用启动时的主账号凭据；修改密码后停止并重新启动。
 
 ## 脚本与 JSON 输出
 
@@ -255,18 +259,24 @@ zju --config ./credentials.env courses --json --quiet
 
 ### 后台复用登录
 
-首次执行需要鉴权的命令时自动启动认证后台。后台在内存中持有 CAS Cookie；同一账号首次登录后，访问另一个平台时先使用已有 CAS 登录态获取该平台的新票据。CAS 再次返回登录表单时才提交账号密码。各平台建立的会话在后台缓存，后续 CLI 进程和音频 Worker 共用它们。
+首次执行需要鉴权的命令时自动启动认证后台。后台在内存中持有 CAS Cookie；同一账号首次登录后，访问另一个平台时先使用已有 CAS 登录态获取该平台的新票据。CAS 再次返回登录表单时才提交账号密码。各平台建立的会话在后台缓存，后续 CLI 请求与任务通过后台模块使用认证能力。
 
 ```sh
 zju daemon status --json
+zju daemon start
+zju daemon restart
 zju daemon stop
 ```
+
+Linux 服务管理器可使用前台入口 `zju daemon run`；它保持进程运行并响应 SIGINT/SIGTERM。`ZJU_LOG_OUTPUT=stderr` 可将日志交给 systemd 收集，默认按上海日期写入用户状态目录的 `logs/daemon-YYYY-MM-DD.log`。
+
+`zju command list` 查看后台注册的公开命令。长任务及周期计划可通过 `zju task ...` 与 `zju schedules ...` 管理。现有课堂回放 CLI 保持原用法。
 
 `status` 不启动后台、不访问学校服务，也不需要学校凭据。每个操作系统用户共用一个后台，账号、密码、HTTP 超时和任务目录不会生成额外实例。后台绑定主账号，其他账号请求明确拒绝。
 
 后台监听 `127.0.0.1`，用户私有运行目录存储地址与独立随机密钥，请求和响应签名校验并防止重放。凭据从启动标准输入进入内存。后台仅长期保留 CAS Cookie，每次操作使用独立站点会话；认证串行，业务 HTTP 不持有认证锁。认证失败冷却 30 秒，网络故障不触发冷却。只读认证失效最多重试一次，写入不自动重放。
 
-`daemon stop` 停止接受业务和调度，暂停未完成下载、回收 ffmpeg，并等待已接受的短业务请求结束。下次业务自动启动后台，下载与普通周期任务保持暂停；曾显式启用的 autosign 恢复运行。切换新版前先用旧版停止旧认证后台。模块边界及迁移细节见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+`daemon stop` 停止接受业务和调度，通知任务中断并回收 ffmpeg，等待已接收的短请求结束。下次业务自动启动后台；中断任务须显式恢复，中断轮次的普通计划须显式 enable；曾显式启用的 autosign 先恢复核实。切换新版前先用旧版停止旧认证后台。模块边界及迁移细节见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 开发与验证
 
@@ -275,7 +285,7 @@ python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-测试使用标准库 `unittest`，不需要 pytest，也不访问学校账号或服务。安装 ffmpeg 后会运行本地合成音频和独立 Worker 测试；未安装时跳过需要 ffmpeg 的测试。GitHub Actions 配置了 Windows / Linux、Python 3.11 / 3.13 的安装与测试。
+测试使用标准库 `unittest`，不需要 pytest，也不访问学校账号或服务。安装 ffmpeg 后会运行本地合成音频、统一 daemon 下载及取消测试；未安装时跳过需要 ffmpeg 的测试。GitHub Actions 配置了 Windows / Linux、Python 3.11 / 3.13 的安装与测试。
 
 可选真实账号检查，仅查询待办、课程、作业详情和课表：
 
@@ -290,19 +300,21 @@ python -X utf8 scripts/smoke_readonly.py --date 2026-10-04 --end-date 2026-10-10
 
 | 模块 | 职责 |
 | --- | --- |
-| `cli.py`、`output.py` | 参数解析、退出码、终端和 JSON 输出 |
-| `clients/auth.py`、`clients/http.py` | CAS 登录、HTTP 和 Cookie |
-| `session_daemon.py`、`runtime.py`、`app.py` | 用户级后台发现、签名业务 RPC、模块组装与生命周期 |
-| `auth_manager.py` | 串行 CAS 认证与独立临时站点会话 |
-| `job_manager.py`、`scheduler.py` | 双下载并发、任务上下文、周期调度与状态持久化 |
-| `adapters/` | 课程、作业、课表和回放的 API 请求及解析 |
-| `services/platform.py` | 操作内会话复用与只读认证失效重试 |
-| `services/courses.py` | 学在浙大的待办、课程和作业 |
-| `services/classroom.py` | 智云课表、回放链接和音频提取编排 |
-| `services/audio_task.py`、`services/audio_jobs.py` | 音频任务函数、参数准备与结果导出 |
-| `storage.py`、`worker.py` | SQLite 租约与旧 Worker 兼容入口 |
-| `media.py`、`files.py` | ffmpeg 调用与文件安全写入 |
-| `validation.py` | 共用 ID、响应列表与音频超时校验 |
+| `frontend/cli.py`、`frontend/output.py` | CLI 参数、确认、退出码与展示 |
+| `frontend/rpc.py`、`frontend/remote_service.py` | 后台启动、RPC 客户端与命令映射 |
+| `frontend/autostart.py`、`frontend/task_store.py` | 登录启动配置与离线任务查询 |
+| `backend/server.py` | 签名 RPC 服务与 daemon 进程入口 |
+| `backend/daemon.py` | 模块容器、命令注册、RPC action 分发与生命周期 |
+| `backend/modules/` | 草案中的八个模块、统一任务与周期计划 |
+| `backend/modules/zjuam.py` | CAS 登录与独立平台会话 |
+| `backend/modules/` | 学校平台协议、业务流程与任务入口 |
+| `backend/modules/cc98.py`、`backend/modules/webvpn.py` | 论坛与 WebVPN 协议实现 |
+| `backend/modules/classroom.py`、`backend/modules/tasks.py` | ffmpeg/音频处理与任务子进程回收 |
+| `backend/logger.py` | 后台日志 |
+| `shared/http.py`、`shared/config.py`、`shared/errors.py`、`shared/rpc.py` | 共用 HTTP、配置、错误类型和 RPC 协议 |
+| `shared/runtime.py`、`shared/storage.py`、`shared/records.py` | 本机路径和业务记录 |
+| `shared/audio.py`、`shared/files.py` | 原子音频导出与文件安全写入 |
+| `shared/attendance_*.py`、`shared/validation.py` | 签到配置、离线状态及参数校验 |
 
 服务层通过回调报告进度，不直接打印，可供其他适配器复用。
 
@@ -315,3 +327,52 @@ python -X utf8 scripts/smoke_readonly.py --date 2026-10-04 --end-date 2026-10-10
 凭据在本机读取，用于向学校认证服务登录。不要将真实 `.env`、任务数据库、日志、课堂材料或含个人信息的命令输出提交到公开仓库或 Issue。`.gitignore` 已排除常见凭据、任务文件及音频输出，自定义输出文件仍需自行检查。
 
 学校接口可能变更。提交和撤回前请核对账号、作业 ID 和文件；反馈问题时请删除密码、Cookie、签名链接、学号及成绩等敏感信息。
+
+## 模块接口与任务
+
+源码按 [DAEMON_DESIGN.md](DAEMON_DESIGN.md) 和 [MODULE_SPEC.md](MODULE_SPEC.md) 组织；CLI 前端在 `src/zju_cli/frontend/`，daemon 后端在 `src/zju_cli/backend/`，共用代码在 `src/zju_cli/shared/`。后端入口为 `backend/daemon.py`，协议和业务实现均在 `backend/modules/`。模块构造时注册绑定方法，业务通过 daemon.* 直接调用其他模块。
+
+```powershell
+zju command list --json
+zju task submit courses.todos --parameters '{}' --json
+zju task list --command courses.todos --json
+zju task get TASK_ID --json
+zju task wait TASK_ID --wait-timeout 20 --json
+zju task cancel TASK_ID --json
+zju task resume TASK_ID --json
+zju schedules create courses.todos --parameters '{}' --interval 60 --enabled --json
+zju schedules list --json
+zju schedules disable SCHEDULE_ID --json
+zju schedules delete SCHEDULE_ID --json
+zju zjuam status --json
+zju webvpn status --json
+```
+
+普通查询终态在内存保留三十分钟；作业写入、下载和计划轮次持久保存。任务恢复必须满足 interrupted、durable、resumable 和相同命令版本。每个计划完成一轮后再等待间隔，业务失败继续、内部异常暂停，关闭保留启用意图。普通计划遇到中断轮次后需显式 enable。task/schedules 中的真实作业写入也需要确认，非交互执行传 `--yes`。
+
+## 课程资料与论坛
+
+```powershell
+zju materials list --course-id 12345 --json
+zju materials download --course-id 12345 --file-id 67890 --out ./课件 --json
+zju materials sync --course-id 12345 --out ./课件 --json
+zju cc98 search 关键词 --from 0 --size 20 --json
+zju cc98 posts 123456 --from 0 --size 10 --json
+zju cc98 hot --range weekly --json
+zju cc98 user --name 用户名 --json
+zju cc98 download https://file.cc98.org/example.pdf --dir ./附件 --json
+```
+
+资料下载、同步和论坛下载默认返回 task_id；用 task wait/get/list 查看结果。资料清单位于输出目录的 course_<ID>/.materials.json，按附件 ID 去重、保存大小和 SHA-256，增量同步保留本地修改文件并报告冲突。单附件失败后继续处理，其汇总结果的 ok=false 表示需要处理失败或冲突后重试。
+
+CC98 需要 `.env` 中的 `CC98_USERNAME`、`CC98_PASSWORD`；WebVPN 使用 `ZJU_USER`、`ZJU_PASS`。`--webvpn-mode auto/direct/vpn` 控制路由；size 为 1–20，posts 默认 10，其余默认 20，nextFrom 用于下一页。图片上限 3.75 MiB，附件上限 100 MiB；同名文件编号保存。Token 只保存在后台内存，优先刷新并按路由隔离；需要验证码时返回认证错误。
+
+协议与解析代码参考 cc98-mcp（EviterLesRoses2）与 CC98-CLI（Lucent-Snow），MIT 许可及版权声明随包保存于 LICENSE-cc98-mcp 和 LICENSE-CC98-CLI。
+
+## Linux 服务与日志
+
+Linux 配置目录为 `$XDG_CONFIG_HOME/zju-cli/`，默认 `~/.config/zju-cli/`；状态目录为 `$XDG_STATE_HOME/zju-cli/`，默认 `~/.local/state/zju-cli/`；运行信息在 `$XDG_RUNTIME_DIR/zju-cli/`，缺省使用状态目录下 run/。相对 XDG 值忽略；原 `~/.secrets/zju-cli/.env` 与工作目录 `.env` 保留兼容，显式 `--config` 选择配置文件，环境变量优先。
+
+`deploy/systemd/zju-cli.service` 是用户服务示例。将 ExecStart 调整为安装后的绝对 zju 路径，把凭据写入权限 0600 的配置文件后，可用 `systemctl --user enable --now zju-cli.service` 启动，`journalctl --user -u zju-cli.service -f` 查看日志。前台命令 `zju daemon run` 响应 SIGINT/SIGTERM，停止调度并回收任务子进程。
+
+日志配置：`ZJU_LOG_LEVEL=INFO`、`ZJU_LOG_OUTPUT=file/stderr`、`ZJU_LOG_TIMEZONE=Asia/Shanghai/UTC`，以及可选的 `ZJU_LOG_DIR`。文件默认按日保留，重启追加，目录及私有文件在 Linux 下分别限制为 0700、0600。日志写入失败不改变业务结果。

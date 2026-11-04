@@ -2,9 +2,9 @@
 
 import argparse
 
-from zju_cli.config import Settings
-from zju_cli.output import log
-from zju_cli.services.platform import ZjuService
+from zju_cli.shared.config import Settings
+from zju_cli.frontend.output import log
+from zju_cli.frontend.remote_service import RemoteService as ZjuService
 
 
 def main():

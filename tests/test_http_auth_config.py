@@ -7,10 +7,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
-from zju_cli.clients.auth import CasFormParser, encrypt_password
-from zju_cli.clients.http import HttpSession
-from zju_cli.config import Settings
-from zju_cli.errors import ConfigError, RemoteError, SessionExpired
+from zju_cli.backend.modules.zjuam import CasFormParser, encrypt_password
+from zju_cli.shared.http import HttpSession
+from zju_cli.shared.config import Settings
+from zju_cli.shared.errors import ConfigError, RemoteError, SessionExpired
 
 
 class HttpAuthConfigTests(unittest.TestCase):
@@ -59,7 +59,7 @@ class HttpAuthConfigTests(unittest.TestCase):
                 session.json("https://example/api")
 
     def test_environment_overrides_dotenv_for_all_settings(self):
-        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.config.Path.home", return_value=Path(directory)):
+        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.shared.config.Path.home", return_value=Path(directory)):
             config = Path(directory) / "config.env"
             config.write_text("ZJU_USER=file\nZJU_PASS=private\nZJU_HTTP_TIMEOUT=15\nZJU_SESSION_TTL_MS=120000\n", encoding="utf-8")
             with patch.dict(os.environ, {"ZJU_USER": "environment"}, clear=True):
@@ -75,14 +75,14 @@ class HttpAuthConfigTests(unittest.TestCase):
             credentials = home / ".secrets" / "zju-cli" / ".env"
             credentials.parent.mkdir(parents=True)
             credentials.write_text("ZJU_USER=student\nZJU_PASS=sample\n", encoding="utf-8")
-            with patch("zju_cli.config.Path.home", return_value=home), \
-                 patch("zju_cli.config.Path.cwd", return_value=home), patch.dict(os.environ, {}, clear=True):
+            with patch("zju_cli.shared.config.Path.home", return_value=home), \
+                 patch("zju_cli.shared.config.Path.cwd", return_value=home), patch.dict(os.environ, {}, clear=True):
                 settings = Settings.load()
             self.assertEqual(settings.username, "student")
             self.assertEqual(settings.password, "sample")
 
     def test_nan_timeout_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.config.Path.home", return_value=Path(directory)):
+        with tempfile.TemporaryDirectory() as directory, patch("zju_cli.shared.config.Path.home", return_value=Path(directory)):
             config = Path(directory) / "config.env"
             config.write_text("ZJU_USER=u\nZJU_PASS=p\nZJU_HTTP_TIMEOUT=nan\n", encoding="utf-8")
             with patch.dict(os.environ, {}, clear=True), self.assertRaises(ConfigError):
@@ -97,7 +97,7 @@ class HttpAuthConfigTests(unittest.TestCase):
             working = home / "worker"
             working.mkdir()
             (working / ".env").write_text("ZJU_USER=other\nZJU_PASS=other\n", encoding="utf-8")
-            with patch("zju_cli.config.Path.home", return_value=home), \
-                 patch("zju_cli.config.Path.cwd", return_value=working), patch.dict(os.environ, {}, clear=True):
+            with patch("zju_cli.shared.config.Path.home", return_value=home), \
+                 patch("zju_cli.shared.config.Path.cwd", return_value=working), patch.dict(os.environ, {}, clear=True):
                 self.assertEqual(Settings.load().username, "other")
                 self.assertEqual(Settings.load(load_cwd=False).username, "student")
