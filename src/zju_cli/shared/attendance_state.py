@@ -29,14 +29,11 @@ def _schedule(database, *, enabled=None):
 
 def offline_view(command, parameters=None):
     """Local queries and disabling do not start a daemon or require credentials."""
-    from zju_cli.shared.runtime import runtime_dir
     from zju_cli.shared.records import RecordStore
     from zju_cli.shared.storage import default_data_dir
     state_database = default_data_dir()
     tasks_database = state_database / "tasks.sqlite3"
-    database = default_data_dir() / "scheduler.sqlite3"
-    if not database.is_file():
-        database = runtime_dir() / "scheduler.sqlite3"
+    database = state_database / "scheduler.sqlite3"
     empty = {"enabled": False, "running": False, "last_successful_check": None,
              "next_check": None, "error": None}
     if not database.is_file():
@@ -52,7 +49,6 @@ def offline_view(command, parameters=None):
     if command == "stop":
         schedule = _schedule(tasks_database, enabled=False)
         records.put(namespace,"control",control)
-        records.disable_periodic("autosign")
     if command == "history":
         date = (parameters or {}).get("date")
         return {"query_count": 0, "events": [e for e in records.events(namespace) if date is None or e["confirmed_at"].startswith(date)]}

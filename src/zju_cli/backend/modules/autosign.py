@@ -14,8 +14,9 @@ class NextRun:
 class AutosignModule:
     def __init__(self, daemon, config):
         self.daemon, self.config = daemon, config
+        self._session = None
         self.service = AttendanceService(
-            daemon, config.username, daemon.courses.attendance_adapter)
+            daemon, config.username, self._attendance_adapter)
         self.notifications = AttendanceNotifications(self.service.records, self.service.namespace,
             daemon.state_dir, lambda: self.service.config)
         self.service.notifications = self.notifications
@@ -29,6 +30,32 @@ class AutosignModule:
                                     "internal_only": True, "serial_group": "autosign"}),
         ):
             daemon.command_registry.register("autosign." + name, handler, **options)
+
+    def _discard_session(self):
+        session, self._session = self._session, None
+        if session is not None:
+            session.close()
+
+    def _attendance_adapter(self):
+        # AttendanceService's lock serializes all users of this private session.
+        if self._session is None:
+            self._session = self.daemon.zjuam.courses(self.config.timeout_seconds)
+        adapter = self.daemon.courses.attendance_adapter(session=self._session)
+        owner = self
+
+        class Session:
+            def __getattr__(self, name):
+                operation = getattr(adapter, name)
+
+                def invoke(*args, **kwargs):
+                    try:
+                        return operation(*args, **kwargs)
+                    except SessionExpired:
+                        owner._discard_session()
+                        raise
+                return invoke
+
+        return Session()
 
     def restore(self):
         self.service.restore()
@@ -71,6 +98,8 @@ class AutosignModule:
 
     def close(self):
         self.service.shutdown()
+        with self.service.lock:
+            self._discard_session()
         self.notifications.close()
 
 

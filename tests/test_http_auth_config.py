@@ -61,12 +61,11 @@ class HttpAuthConfigTests(unittest.TestCase):
     def test_environment_overrides_dotenv_for_all_settings(self):
         with tempfile.TemporaryDirectory() as directory, patch("zju_cli.shared.config.Path.home", return_value=Path(directory)):
             config = Path(directory) / "config.env"
-            config.write_text("ZJU_USER=file\nZJU_PASS=private\nZJU_HTTP_TIMEOUT=15\nZJU_SESSION_TTL_MS=120000\n", encoding="utf-8")
+            config.write_text("ZJU_USER=file\nZJU_PASS=private\nZJU_HTTP_TIMEOUT=15\n", encoding="utf-8")
             with patch.dict(os.environ, {"ZJU_USER": "environment"}, clear=True):
                 settings = Settings.load(config)
             self.assertEqual(settings.username, "environment")
             self.assertEqual(settings.timeout_seconds, 15)
-            self.assertEqual(settings.session_ttl_seconds, 120)
             self.assertNotIn("private", repr(settings))
 
     def test_default_credentials_are_loaded_from_zju_cli_directory(self):
@@ -88,7 +87,7 @@ class HttpAuthConfigTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True), self.assertRaises(ConfigError):
                 Settings.load(config)
 
-    def test_worker_config_does_not_load_its_working_directory_env(self):
+    def test_detached_config_loads_without_working_directory_env(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             credentials = home / ".secrets" / "zju-cli" / ".env"

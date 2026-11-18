@@ -58,7 +58,6 @@ def stop_process(process):
 class TaskContext:
     def __init__(self, tasks, task_id):
         self.tasks, self.id = tasks, task_id
-        self.job_id = task_id
         row = tasks._rows[task_id]
         self.attempt, self.recovery, self.deadline = row["attempt"], row["recovery"], row.get("deadline")
         self.http_timeout = row.get("http_timeout") or tasks.config.timeout_seconds
@@ -132,7 +131,6 @@ class TasksModule:
         self.lock = threading.RLock()
         self.stopping = threading.Event()
         self._rows, self._parameters, self._contexts, self._futures = {}, {}, {}, {}
-        self._groups = {}
         self._serial_locks = {}
         self.slots = threading.BoundedSemaphore(20)
         self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="task")
@@ -142,15 +140,18 @@ class TasksModule:
                 raise InputError("未知任务数据库版本")
             db.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, document TEXT NOT NULL)")
             db.execute("PRAGMA user_version=1")
-            for task_id, raw in db.execute("SELECT id, document FROM tasks"):
-                row = json.loads(raw)
-                if row.get("username") != config.username:
-                    continue
-                if row["state"] in {"queued", "running"}:
-                    row.update(state="interrupted", completed_at=time.time())
-                self._rows[task_id] = row
-        for row in self._rows.values():
-            self._save(row)
+            # Expression indexes preserve the existing document format. Building
+            # them scans old rows once; subsequent startups only touch active tasks.
+            for name, fields in (
+                ("tasks_owner_created", "json_extract(document,'$.username'), json_extract(document,'$.created_at') DESC"),
+                ("tasks_owner_command_created", "json_extract(document,'$.username'), json_extract(document,'$.command'), json_extract(document,'$.created_at') DESC"),
+                ("tasks_owner_state_created", "json_extract(document,'$.username'), json_extract(document,'$.state'), json_extract(document,'$.created_at') DESC"),
+            ):
+                db.execute(f"CREATE INDEX IF NOT EXISTS {name} ON tasks ({fields})")
+            db.execute("UPDATE tasks SET document=json_set(document, '$.state', 'interrupted', '$.completed_at', ?) "
+                       "WHERE json_extract(document,'$.username')=? "
+                       "AND json_extract(document,'$.state') IN ('queued','running')",
+                       (time.time(), config.username))
         if os.name != "nt":
             self.root.chmod(0o700)
             self.database.chmod(0o600)
@@ -165,7 +166,9 @@ class TasksModule:
     def _update(self, task_id, **changes):
         changes = json.loads(json.dumps(changes, allow_nan=False))
         with self.lock:
-            row = self._rows[task_id]
+            row = self._rows.get(task_id)
+            if row is None:
+                row = self.get(task_id)
             row.update(changes, updated_at=time.time())
             self._save(row)
 
@@ -174,7 +177,24 @@ class TasksModule:
         for key, row in tuple(self._rows.items()):
             if not row["durable"] and row["state"] in TERMINAL and row["completed_at"] < cutoff:
                 self._rows.pop(key)
-                self._futures.pop(key, None)
+
+    def _evict_persisted_task(self, task_id):
+        row = self._rows.get(task_id)
+        if row is not None and row["durable"] and row["state"] in TERMINAL:
+            self._rows.pop(task_id)
+
+    def _start_future(self, task_id, spec):
+        def finished(future):
+            with self.lock:
+                if self._futures.get(task_id) is future:
+                    self._futures.pop(task_id)
+                    # Queued cancellation writes its terminal state after Future.cancel().
+                    if not future.cancelled():
+                        self._evict_persisted_task(task_id)
+
+        future = self.executor.submit(self._run, task_id, spec)
+        self._futures[task_id] = future
+        future.add_done_callback(finished)
 
     def submit_request(self, command, parameters, *, username,
                        deadline=None, timeout=None, artifact_root=None):
@@ -226,10 +246,8 @@ class TasksModule:
                 self._rows[task_id] = row
                 self._parameters[task_id] = parameters
                 self._contexts[task_id] = TaskContext(self, task_id)
-                if spec.serial_group:
-                    self._groups.setdefault(spec.serial_group, []).append(task_id)
                 self._save(row)
-                self._futures[task_id] = self.executor.submit(self._run, task_id, spec)
+                self._start_future(task_id, spec)
             except BaseException:
                 self.slots.release()
                 self._rows.pop(task_id, None)
@@ -292,7 +310,13 @@ class TasksModule:
         with self.lock:
             self._purge()
             if task_id not in self._rows:
-                raise InputError("任务不存在")
+                with closing(sqlite3.connect(self.database)) as db:
+                    stored = db.execute("SELECT document FROM tasks WHERE id=? "
+                        "AND json_extract(document,'$.username')=?",
+                        (task_id, self.config.username)).fetchone()
+                if stored is None:
+                    raise InputError("任务不存在")
+                return json.loads(stored[0])
             return deepcopy(self._rows[task_id])
     def list(self, command=None, state=None, limit=20):
         if type(limit) is not int or not 1 <= limit <= 100 or state is not None and state not in TERMINAL | {"queued", "running"}:
@@ -301,7 +325,18 @@ class TasksModule:
             self._purge()
             rows = [row for row in self._rows.values() if (command is None or row["command"] == command)
                     and (state is None or row["state"] == state)]
-            return deepcopy(sorted(rows, key=lambda row: row["created_at"], reverse=True)[:limit])
+            clauses = ["json_extract(document,'$.username')=?"]
+            values = [self.config.username]
+            for field, value in (("command", command), ("state", state)):
+                if value is not None:
+                    clauses.append(f"json_extract(document,'$.{field}')=?")
+                    values.append(value)
+            with closing(sqlite3.connect(self.database)) as db:
+                stored = db.execute("SELECT document FROM tasks WHERE " + " AND ".join(clauses)
+                    + " ORDER BY json_extract(document,'$.created_at') DESC LIMIT ?", (*values, limit))
+                merged = {row["id"]: row for (raw,) in stored for row in [json.loads(raw)]}
+            merged.update((row["id"], row) for row in rows)
+            return deepcopy(sorted(merged.values(), key=lambda row: row["created_at"], reverse=True)[:limit])
 
     def cancel(self, task_id):
         with self.lock:
@@ -316,6 +351,7 @@ class TasksModule:
                 self._update(task_id, state="cancelled", completed_at=time.time())
                 self._parameters.pop(task_id, None)
                 self._contexts.pop(task_id, None)
+                self._evict_persisted_task(task_id)
                 self.slots.release()
             elif future is None or future.done():
                 self._update(task_id, state="cancelled", completed_at=time.time())
@@ -335,19 +371,21 @@ class TasksModule:
             if self.stopping.is_set() or not self.slots.acquire(blocking=False):
                 raise BusyError("后台正在停止或任务队列已满")
             self._parameters[task_id] = deepcopy(row["parameters"])
+            self._rows[task_id] = row
             self._update(task_id, state="queued", completed_at=None, error=None, attempt=row["attempt"] + 1)
             self._contexts[task_id] = TaskContext(self, task_id)
-            self._futures[task_id] = self.executor.submit(self._run, task_id, spec)
+            self._start_future(task_id, spec)
         return task_id
 
     def begin_stop(self):
         self.stopping.set()
         with self.lock:
-            for task_id, future in self._futures.items():
+            for task_id, future in tuple(self._futures.items()):
                 if task_id in self._contexts and future.cancel():
                     self._update(task_id, state="interrupted", completed_at=time.time())
                     self._parameters.pop(task_id, None)
                     self._contexts.pop(task_id, None)
+                    self._evict_persisted_task(task_id)
                     self.slots.release()
             contexts = tuple(self._contexts.values())
         for context in contexts:

@@ -14,8 +14,6 @@ from zju_cli.backend.modules.tasks import TasksModule, current_task
 from zju_cli.backend.modules.zjuam import ZjuamModule
 from zju_cli.backend.modules.webvpn import WebVPNModule
 from zju_cli.backend.modules.cc98 import Cc98Module
-from zju_cli.shared.runtime import runtime_dir
-from zju_cli.shared.rpc import PROTOCOL
 from zju_cli.shared.storage import default_data_dir
 
 logger = logging.getLogger(__name__)
@@ -24,7 +22,7 @@ logger = logging.getLogger(__name__)
 class Daemon:
     def __init__(self, config, *, auth=None, state_dir=None):
         self.command_registry = CommandRegistry()
-        self.config = self.settings = config
+        self.config = config
         self.state_dir = Path(state_dir) if state_dir else default_data_dir()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = threading.RLock()
@@ -32,7 +30,6 @@ class Daemon:
         self._closed = False
         self._modules = []
         try:
-            self._migrate_records()
             self._attach("tasks", TasksModule)
             self._attach("schedules", SchedulesModule)
             self._attach("zjuam", lambda daemon, config: ZjuamModule(daemon, config, auth=auth))
@@ -59,16 +56,6 @@ class Daemon:
         module = constructor(self, self.config)
         setattr(self, name, module)
         self._modules.append(module)
-
-    def _migrate_records(self):
-        source = runtime_dir() / "scheduler.sqlite3"
-        target = self.state_dir / "scheduler.sqlite3"
-        if source.is_file() and source.resolve() != target.resolve() and not target.exists():
-            import sqlite3
-            from contextlib import closing
-            with closing(sqlite3.connect(source)) as old, closing(sqlite3.connect(target)) as new:
-                old.backup(new)
-            logger.info("migrated attendance records; legacy database retained")
 
     @property
     def task(self):
@@ -118,11 +105,7 @@ class Daemon:
         elif action == "command.list":
             result = self.command_registry.command_list()
         elif action == "status":
-            result = {
-                **self.status(),
-                "protocol": PROTOCOL,
-                "platforms": [],
-            }
+            result = self.status()
         else:
             raise RemoteError("未知后台操作")
         return result, shutdown

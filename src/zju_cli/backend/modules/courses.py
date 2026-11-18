@@ -55,8 +55,9 @@ class CoursesModule:
         except SessionExpired:
             return operation(self._courses_session(refresh=True))
 
-    def attendance_adapter(self):
-        adapter = AttendanceAdapter(self.daemon.zjuam.courses(self.config.timeout_seconds))
+    def attendance_adapter(self, *, session=None):
+        adapter = AttendanceAdapter(session if session is not None else
+            self.daemon.zjuam.courses(self.config.timeout_seconds))
         class Session:
             def __getattr__(self, name):
                 operation = getattr(adapter, name)

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from zju_cli.backend.daemon import Daemon as BackgroundApp
+from zju_cli.backend.daemon import Daemon
 from zju_cli.shared.config import Settings
 from zju_cli.shared.errors import RemoteError
 from zju_cli.backend.modules.classroom import extract_audio
@@ -28,10 +28,10 @@ def run_task(app, command, parameters, username):
     return task["result"]
 
 
-class AppTests(unittest.TestCase):
+class DaemonIntegrationTests(unittest.TestCase):
     def test_audio_conflict_preserves_target_and_allows_export(self):
-        with tempfile.TemporaryDirectory() as temporary, patch("zju_cli.backend.daemon.runtime_dir", return_value=Path(temporary) / "run"):
-            app = BackgroundApp(Settings("one", "secret"), state_dir=Path(temporary) / "state")
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Daemon(Settings("one", "secret"), state_dir=Path(temporary) / "state")
             target = Path(temporary) / "output.wav"
             def audio(sub_id, course_id, source, **kwargs):
                 target.write_bytes(b"existing")
@@ -63,8 +63,8 @@ class AppTests(unittest.TestCase):
                 app.close()
 
     def test_cancelling_audio_during_extraction_does_not_export(self):
-        with tempfile.TemporaryDirectory() as temporary, patch("zju_cli.backend.daemon.runtime_dir", return_value=Path(temporary) / "run"):
-            app = BackgroundApp(Settings("one", "secret"), state_dir=Path(temporary) / "state")
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Daemon(Settings("one", "secret"), state_dir=Path(temporary) / "state")
             entered, release = threading.Event(), threading.Event()
             target = Path(temporary) / "output.wav"
             def audio(sub_id, course_id, source, **kwargs):
@@ -105,8 +105,8 @@ class AppTests(unittest.TestCase):
             children.append(child)
             started.set()
             return child
-        with tempfile.TemporaryDirectory() as temporary, patch("zju_cli.backend.daemon.runtime_dir", return_value=Path(temporary) / "run"):
-            app = BackgroundApp(Settings("one", "secret"), state_dir=Path(temporary) / "state")
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Daemon(Settings("one", "secret"), state_dir=Path(temporary) / "state")
             app.courses.service.todos = lambda: {"count": 0}
             app.classroom.service.audio = lambda sub_id, course_id, target, **kwargs: extract_audio(
                 "unused-local-input", target, should_stop=kwargs["should_stop"],
@@ -132,8 +132,8 @@ class AppTests(unittest.TestCase):
                         child.wait(timeout=5)
 
     def test_audio_creation_execution_and_persistence_through_app(self):
-        with tempfile.TemporaryDirectory() as temporary, patch("zju_cli.backend.daemon.runtime_dir", return_value=Path(temporary) / "runtime"):
-            app = BackgroundApp(Settings("one", "secret"), state_dir=Path(temporary) / "state")
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Daemon(Settings("one", "secret"), state_dir=Path(temporary) / "state")
             def audio(sub_id, course_id, target, **kwargs):
                 kwargs["on_media_progress"]({"media_position": "00:00:01"})
                 target.write_bytes(b"complete-audio")
@@ -172,8 +172,8 @@ class AppTests(unittest.TestCase):
 
     def test_slow_business_does_not_hold_status_lock_and_stop_waits(self):
         entered, release = threading.Event(), threading.Event()
-        with tempfile.TemporaryDirectory() as temporary, patch("zju_cli.backend.daemon.runtime_dir", return_value=Path(temporary)):
-            app = BackgroundApp(Settings("one", "secret"), state_dir=Path(temporary) / "state")
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Daemon(Settings("one", "secret"), state_dir=Path(temporary) / "state")
             def todos():
                 entered.set()
                 release.wait(5)

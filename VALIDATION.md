@@ -1,5 +1,13 @@
 # 重构验证记录
 
+## 旧架构内部迁移层清理（2026-11-05）
+
+- 删除 Daemon 启动时将旧运行目录 `scheduler.sqlite3` 复制到状态目录的逻辑，离线签到视图也只读取当前状态目录。
+- 删除计划加载时对旧 `internal` 字段的读取后回写，以及 `RecordStore` 对旧 `periodic_tasks` 表的停用更新。
+- 删除无运行语义的 `ZJU_SESSION_TTL_MS` / `session_ttl_seconds` 配置兼容，并移除未消费的 `protocol`、`platforms` 状态字段及 `address.json` 写入。
+- 删除旧任务上下文的 `job_id` 属性和 Daemon 的 `settings` 别名；仍被课程/课堂模块使用的进度回调保留。CLI 不再以 `ZjuService` 命名当前 `RemoteService`，Daemon 集成测试不再使用 `BackgroundApp` 或旧运行目录夹具。
+- 完整回归 `python -m unittest discover -s tests`：共 145 项，143 项通过、2 项因 Windows 环境跳过；源码编译和 `git diff --check` 通过。
+
 ## 旧音频任务兼容层删除（2026-11-05）
 
 - 删除 `jobs.sqlite3` 任务导入、旧 Worker 租约取消、旧任务视图、`LegacyAudioResults`、`JobStore`、`read_legacy_audio` 和 `wait_audio_job`。
@@ -120,8 +128,8 @@
 | 请求防重放、未认证拒绝、写入丢响应不重放 | 后台进程测试及业务服务测试 |
 | 临时 CookieJar、父域路径筛选、失败冷却 | `test_auth_manager.py` |
 | 跨目录双并发、停止暂停、旧租约保护与过期恢复、取消释放 | `test_job_manager.py` |
-| 后台创建、音频结果导出、完整内部音频复用 | `test_app.py` |
-| 慢业务不阻塞状态、账号拒绝、停止拒绝新业务 | `test_app.py` |
+| 后台创建、音频结果导出、完整内部音频复用 | `test_daemon_integration.py` |
+| 慢业务不阻塞状态、账号拒绝、停止拒绝新业务 | `test_daemon_integration.py` |
 | 周期合并、不重叠、退避、暂停、重启暂停、写入失败不重试 | 可控时钟 `test_scheduler.py` |
 | ffmpeg 超时、取消和子进程回收 | `test_media.py`；旧 Worker 保留本地 HTTP 与真实 ffmpeg 集成测试 |
 

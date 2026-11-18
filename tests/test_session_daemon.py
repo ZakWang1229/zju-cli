@@ -24,6 +24,39 @@ from zju_cli.frontend.rpc import DaemonClient, endpoint
 
 
 class SessionPoolTests(unittest.TestCase):
+    def test_restart_retries_connection_reset_during_shutdown(self):
+        client = DaemonClient(Settings("test", "fake"))
+        failure = RemoteError("status failed")
+        failure.__cause__ = ConnectionResetError()
+        ready = {"running": True, "accepting": True}
+        with patch.object(client, "status", side_effect=[ready, failure,
+                {"running": False}, {"running": False}, ready]), \
+                patch.object(client, "call") as call, \
+                patch.object(client, "_start") as start, \
+                patch("zju_cli.frontend.rpc.time.sleep"):
+            self.assertEqual(client.restart(), ready)
+        call.assert_called_once_with({"action": "stop"}, start=False)
+        start.assert_called_once_with()
+
+    def test_start_waits_for_existing_initialization(self):
+        client = DaemonClient(Settings("test", "fake"))
+        failure = RemoteError("status failed")
+        failure.__cause__ = TimeoutError()
+        ready = {"running": True, "accepting": True}
+        with patch.object(client, "status", side_effect=[failure, ready]), \
+                patch.object(client, "_start") as start, \
+                patch("zju_cli.frontend.rpc.time.sleep"):
+            self.assertEqual(client.start(), ready)
+        start.assert_not_called()
+
+    def test_start_does_not_hide_identity_failure(self):
+        client = DaemonClient(Settings("test", "fake"))
+        with patch.object(client, "status", side_effect=RemoteError("identity failed")), \
+                patch.object(client, "_start") as start:
+            with self.assertRaisesRegex(RemoteError, "identity failed"):
+                client.start()
+        start.assert_not_called()
+
     def test_bad_response_signature_is_rejected(self):
         client = DaemonClient(Settings("test", "fake"))
         connection = Mock()
@@ -403,4 +436,6 @@ class DaemonProcessTests(unittest.TestCase):
             return process
 
         with patch("zju_cli.frontend.rpc.subprocess.Popen", side_effect=record):
-            self.assertEqual(self.client.call({"action": "status"})["platforms"], [])
+            status = self.client.call({"action": "status"})
+            self.assertTrue(status["running"])
+            self.assertNotIn("platforms", status)

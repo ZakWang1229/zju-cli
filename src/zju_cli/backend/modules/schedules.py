@@ -24,17 +24,12 @@ class SchedulesModule:
         self.stopping = threading.Event()
         self.thread = threading.Thread(target=self._run, name="schedules", daemon=True)
         self._rows = {}
-        migrated = []
         with closing(sqlite3.connect(self.database)) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS schedules (id TEXT PRIMARY KEY, document TEXT NOT NULL)")
             for key, raw in db.execute("SELECT id,document FROM schedules"):
                 row = json.loads(raw)
                 if row.get("username") == config.username:
-                    if row.pop("internal", None) is not None:
-                        migrated.append(key)
                     self._rows[key] = row
-        for key in migrated:
-            self._save(self._rows[key])
         for name in ("create", "get", "list", "enable", "disable", "delete"):
             daemon.command_registry.register("schedule." + name, getattr(self, name))
 

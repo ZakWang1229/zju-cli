@@ -222,7 +222,7 @@ zju class-audio jobs result $jobId --out ./recovered.m4a --json
 | Windows | `%LOCALAPPDATA%\zju-cli` |
 | Linux / macOS | `$XDG_STATE_HOME/zju-cli`，未设置时为 `~/.local/state/zju-cli` |
 
-新任务与计划的元数据统一保存在后台状态目录。音频 `--data-dir` / `ZJU_DATA_DIR` 可指定产物目录，也用于查找旧版任务；新 task 的产物路径记录在任务元数据中。
+新任务与计划的元数据统一保存在后台状态目录。音频 `--data-dir` / `ZJU_DATA_DIR` 可指定产物目录；任务产物路径记录在任务元数据中。
 
 ```text
 zju-cli/

@@ -14,7 +14,7 @@ from zju_cli.backend.modules.schedules import SchedulesModule
 from zju_cli.backend.modules.tasks import TasksModule
 from zju_cli.backend.modules.autosign import NextRun
 from zju_cli.shared.records import RecordStore as JobRecords
-from zju_cli.backend.modules.autosign import AttendanceService, AttendanceNotifications
+from zju_cli.backend.modules.autosign import AutosignModule, AttendanceService, AttendanceNotifications
 from zju_cli.shared.attendance_state import offline_view
 from zju_cli.shared.attendance_config import distance, estimate_position, validate_config
 
@@ -44,6 +44,53 @@ class AttendanceRuntime(CommandRegistry):
 def activity(activity_id="1", **changes):
     return {"rollcall_id":activity_id,"course_title":"课程","title":"签到", "is_number":True,
             "is_radar":False,"is_expired":False,"rollcall_status":"in_progress","status":"absent", **changes}
+
+
+class AutosignSessionTests(unittest.TestCase):
+    def setUp(self):
+        self.module = AutosignModule.__new__(AutosignModule)
+        self.module.config = Settings("account", "password")
+        self.module.daemon = Mock()
+        self.module._session = None
+        self.first, self.second = Mock(), Mock()
+        self.module.daemon.zjuam.courses.side_effect = [self.first, self.second]
+        self.adapter = Mock()
+        self.adapter.activities.return_value = []
+        self.module.daemon.courses.attendance_adapter.return_value = self.adapter
+
+    def test_rounds_reuse_private_session(self):
+        for _ in range(3):
+            self.module._attendance_adapter().activities()
+        self.module.daemon.zjuam.courses.assert_called_once_with(
+            self.module.config.timeout_seconds)
+        self.module.daemon.courses.attendance_adapter.assert_called_with(session=self.first)
+        self.first.close.assert_not_called()
+
+    def test_expiration_discards_session_and_discovery_refreshes_once(self):
+        self.adapter.activities.side_effect = [SessionExpired("expired"), [], []]
+        service = AttendanceService.__new__(AttendanceService)
+        service.adapter_factory = self.module._attendance_adapter
+        service._discover()
+        service._discover()
+        self.assertEqual(self.module.daemon.zjuam.courses.call_count, 2)
+        self.first.close.assert_called_once_with()
+        self.assertIs(self.module._session, self.second)
+
+    def test_expired_write_is_not_replayed(self):
+        self.adapter.number.side_effect = SessionExpired("expired")
+        with self.assertRaises(SessionExpired):
+            self.module._attendance_adapter().number("1", "1234")
+        self.adapter.number.assert_called_once_with("1", "1234")
+        self.assertIsNone(self.module._session)
+
+    def test_close_releases_private_session(self):
+        self.module._attendance_adapter()
+        self.module.service = Mock()
+        self.module.service.lock = threading.Lock()
+        self.module.notifications = Mock()
+        self.module.close()
+        self.first.close.assert_called_once_with()
+        self.assertIsNone(self.module._session)
 
 
 class AttendanceTests(unittest.TestCase):

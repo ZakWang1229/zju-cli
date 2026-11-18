@@ -12,7 +12,7 @@ from zju_cli import __version__
 from zju_cli.shared.config import Settings
 from zju_cli.shared.errors import InputError, ZjuError
 from zju_cli.frontend.output import emit, log
-from zju_cli.frontend.remote_service import RemoteService as ZjuService
+from zju_cli.frontend.remote_service import RemoteService
 from zju_cli.shared.storage import default_data_dir
 from zju_cli.frontend.rpc import DaemonClient
 
@@ -383,7 +383,10 @@ def run(args):
         return {"schedules": result} if isinstance(result, list) else result
     if args.command == "class-audio":
         return run_audio(args)
-    service = ZjuService(Settings.load(args.config, args.http_timeout), on_progress=None if args.quiet else log)
+    service = RemoteService(
+        Settings.load(args.config, args.http_timeout),
+        on_progress=None if args.quiet else log,
+    )
     if args.command == "todos":
         return service.todos()
     if args.command == "courses":

@@ -7,6 +7,8 @@ import unittest
 import os
 import subprocess
 import sys
+import sqlite3
+from contextlib import closing
 
 from zju_cli.backend.command_registry import CommandRegistry
 from zju_cli.shared.config import Settings
@@ -40,6 +42,86 @@ def wait_task(runtime, task_id, timeout=3):
 
 
 class TasksSpecTests(unittest.TestCase):
+    def test_restore_only_writes_interrupted_tasks_for_current_account(self):
+        with TemporaryDirectory() as root:
+            database = Path(root) / "tasks.sqlite3"
+            documents = {}
+            with closing(sqlite3.connect(database)) as db, db:
+                db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, document TEXT NOT NULL)")
+                db.execute("CREATE TABLE writes (id TEXT)")
+                db.execute("CREATE TRIGGER track_update AFTER UPDATE ON tasks "
+                           "BEGIN INSERT INTO writes VALUES (new.id); END")
+                db.execute("CREATE TRIGGER track_insert AFTER INSERT ON tasks "
+                           "BEGIN INSERT INTO writes VALUES (new.id); END")
+                for key, state, user in (
+                    ("queued", "queued", "unit-test"),
+                    ("running", "running", "unit-test"),
+                    ("done", "succeeded", "unit-test"),
+                    ("failed", "failed", "unit-test"),
+                    ("other", "running", "other-account"),
+                ):
+                    documents[key] = json.dumps({"id": key, "username": user,
+                        "state": state, "durable": True, "completed_at": None})
+                    db.execute("INSERT INTO tasks VALUES (?,?)", (key, documents[key]))
+                db.execute("DELETE FROM writes")
+            runtime = Runtime(root)
+            try:
+                self.assertEqual(runtime.tasks._rows, {})
+                with closing(sqlite3.connect(database)) as db:
+                    rows = dict(db.execute("SELECT id,document FROM tasks"))
+                    self.assertEqual(set(db.execute("SELECT id FROM writes")),
+                                     {("queued",), ("running",)})
+                for key in ("done", "failed", "other"):
+                    self.assertEqual(rows[key], documents[key])
+                for key in ("queued", "running"):
+                    restored = json.loads(rows[key])
+                    self.assertEqual(restored["state"], "interrupted")
+                    self.assertIsNotNone(restored["completed_at"])
+                    self.assertEqual(runtime.tasks.get(key)["state"], "interrupted")
+            finally:
+                runtime.close()
+
+    def test_history_is_queried_on_demand_and_merged_with_memory_tasks(self):
+        with TemporaryDirectory() as root:
+            runtime = Runtime(root)
+            runtime.register("saved", lambda: {}, durable=True)
+            old_id = runtime.tasks.submit("saved", {})
+            wait_task(runtime, old_id)
+            runtime.close()
+            runtime = Runtime(root)
+            try:
+                self.assertEqual(runtime.tasks._rows, {})
+                runtime.register("live", lambda: {})
+                live_id = runtime.tasks.submit("live", {})
+                wait_task(runtime, live_id)
+                self.assertEqual([row["id"] for row in runtime.tasks.list(limit=1)], [live_id])
+                self.assertEqual([row["id"] for row in runtime.tasks.list(command="saved")], [old_id])
+                self.assertNotIn(old_id, runtime.tasks._rows)
+                self.assertEqual(runtime.tasks.get(old_id)["state"], "succeeded")
+                self.assertNotIn(old_id, runtime.tasks._rows)
+                with closing(sqlite3.connect(runtime.tasks.database)) as db:
+                    plan = db.execute("EXPLAIN QUERY PLAN SELECT id FROM tasks WHERE "
+                        "json_extract(document,'$.username')=? AND "
+                        "json_extract(document,'$.state') IN ('queued','running')", ("unit-test",)).fetchall()
+                    self.assertTrue(any("SEARCH" in row[3] and "INDEX" in row[3] for row in plan), plan)
+            finally:
+                runtime.close()
+
+    def test_completed_persistent_tasks_release_futures_and_cached_rows(self):
+        with TemporaryDirectory() as root:
+            runtime = Runtime(root)
+            runtime.register("saved", lambda: {"ok": True}, durable=True, serial_group="saved")
+            try:
+                ids = [runtime.tasks.submit("saved", {}) for _ in range(10)]
+                for task_id in ids:
+                    self.assertEqual(wait_task(runtime, task_id)["result"], {"ok": True})
+                runtime.tasks.executor.shutdown(wait=True)
+                self.assertEqual(runtime.tasks._futures, {})
+                self.assertEqual(runtime.tasks._rows, {})
+                self.assertEqual({row["id"] for row in runtime.tasks.list()}, set(ids))
+            finally:
+                runtime.close()
+
     def test_internal_schedule_has_no_persisted_internal_field(self):
         with TemporaryDirectory() as root:
             runtime = Runtime(root)

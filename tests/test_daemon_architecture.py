@@ -46,7 +46,8 @@ class DaemonArchitectureTests(unittest.TestCase):
             )
             try:
                 status, shutdown = daemon.handle_rpc({"action": "status"})
-                self.assertEqual(status["protocol"], 1)
+                self.assertTrue(status["running"])
+                self.assertNotIn("platforms", status)
                 self.assertFalse(shutdown)
 
                 registry, shutdown = daemon.handle_rpc({"action": "command.list"})
@@ -131,8 +132,7 @@ class DaemonArchitectureTests(unittest.TestCase):
                 self.assertIs(caught.exception, error)
                 close.assert_called_once()
     def test_modules_register_public_names_and_share_daemon_dependencies(self):
-        with tempfile.TemporaryDirectory() as temporary, \
-             patch("zju_cli.backend.daemon.runtime_dir", return_value=Path(temporary)):
+        with tempfile.TemporaryDirectory() as temporary:
             daemon = Daemon(Settings("test", "secret"), state_dir=Path(temporary) / "state")
             try:
                 self.assertIsInstance(daemon.command_registry, CommandRegistry)
@@ -161,7 +161,6 @@ class DaemonArchitectureTests(unittest.TestCase):
         import time
         called = __import__("threading").Event()
         with tempfile.TemporaryDirectory() as temporary, \
-             patch("zju_cli.backend.daemon.runtime_dir", return_value=Path(temporary) / "runtime"), \
              patch("zju_cli.shared.storage.default_data_dir", return_value=Path(temporary) / "data"):
             daemon = Daemon(Settings("test", "secret"), state_dir=Path(temporary) / "state")
             daemon.courses.service.todos = lambda: (called.set() or {"count": 0})

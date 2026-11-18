@@ -13,7 +13,7 @@ CLI 参数、确认、展示
   → 模块绑定方法
 ```
 
-`backend/server.py` 只负责验签、JSON 编解码、响应签名和进程生命周期。RPC 消息的 `stop`、`submit`、`command`、`status` 及旧 action 兼容分支统一由 `Daemon.handle_rpc()` 处理；server 根据返回的关闭标志停止监听。
+`backend/server.py` 只负责验签、JSON 编解码、响应签名和进程生命周期。RPC 消息的 `stop`、`submit`、`command`、`status` 和 `command.list` 由 `Daemon.handle_rpc()` 处理；server 根据返回的关闭标志停止监听。
 
 ## 模块布局
 
@@ -45,9 +45,13 @@ CLI 参数、确认、展示
 
 ## 周期计划与 autosign
 
+任务历史按需从 SQLite 读取：启动通过账号和状态索引将遗留 queued/running 任务标为 interrupted，不全量加载历史；get 按 ID 加载并缓存，list 在数据库中筛选、排序和限制条数，再合并本次运行的内存任务。JSON 表达式索引首次升级时建立，后续启动复用。
+
 计划与每轮任务分别持久化。调度器仅检查时间和 task 状态，不另起业务执行池；每轮完成后再等待 interval，错过轮次合并，队列满则等待容量。普通业务失败继续计划，未预期异常停用计划；存在中断轮次的普通计划要求显式 enable。autosign 的中断轮次恢复后先核实已记录的提交意图。
 
 autosign 通过 courses 的平台接口执行策略，使用唯一内置计划。AttendanceService 保留已验证的去重、有限尝试、提交核实与通知算法；它的调度钩子由模块转接到 daemon.schedules，执行仍全部经过 daemon.tasks。stop 停用后续轮次并通知当前轮停止，关闭后台则保留启用意图。签到完成状态和事件在同一事务写入，JSONL/通知失败不改变签到结果。
+
+AutosignModule 独立持有学在浙大的 HTTP 会话，跨检查轮次及手动操作复用 Cookie；首次使用或会话过期后才向 AuthManager 申请新会话。过期会话和模块关闭时释放连接；写请求不会因会话过期自动重放，仍沿用提交核实流程。
 
 ## 认证与资源
 
@@ -57,9 +61,9 @@ CAS 串行握手，仅集中保存 CAS Cookie；courses/classroom 以线程隔�
 
 关闭先停止接收和调度，通知任务停止并回收进程，等待已接收工作退出，再按逆序关闭模块。初始化失败同样关闭已经建立的模块，并保留原始失败。
 
-## 状态、日志与兼容
+## 状态、日志与路径
 
-新任务与计划保存在用户状态目录的 tasks.sqlite3；签到业务记录保存在同目录 scheduler.sqlite3。检测到旧运行目录中的签到数据库时通过 SQLite backup 复制到状态目录，并保留原文件。未知任务数据库版本会拒绝加载。
+新任务与计划保存在用户状态目录的 tasks.sqlite3；签到业务记录保存在同目录 scheduler.sqlite3。后台只读取当前状态目录，不扫描或复制旧运行目录中的数据。未知任务数据库版本会拒绝加载。
 
 音频任务只使用 tasks.sqlite3 和统一 task API。旧 jobs.sqlite3、Worker 租约、旧任务导入及结果兼容层均已删除；`--data-dir` 只指定新任务的产物根目录。
 

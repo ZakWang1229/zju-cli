@@ -10,16 +10,17 @@ import time
 from dataclasses import asdict
 from http.client import HTTPConnection, HTTPException
 from zju_cli.shared.errors import AuthenticationError, RemoteError, SessionExpired, ZjuError, InputError, ConfigError, LocalFileError, BusyError, CancelledError
-from zju_cli.shared.rpc import PROTOCOL, endpoint
+from zju_cli.shared.rpc import endpoint
 
 class DaemonClient:
     def __init__(self, settings):
         self.settings = settings
         self.port, self.key = endpoint(settings)
 
-    def _exchange(self, message):
+    def _exchange(self, message, *, timeout=None):
         connection = HTTPConnection("127.0.0.1", self.port,
-                                    timeout=max(10, self.settings.timeout_seconds * 10))
+                                    timeout=timeout if timeout is not None else
+                                    max(10, self.settings.timeout_seconds * 10))
         try:
             raw = json.dumps(message).encode()
             nonce, stamp = secrets.token_hex(32), str(time.time())
@@ -47,9 +48,9 @@ class DaemonClient:
 
     def status(self):
         try:
-            return self._exchange({"action": "status"})
+            return self._exchange({"action": "status"}, timeout=5)
         except ConnectionRefusedError:
-            return {"running": False, "protocol": PROTOCOL, "platforms": []}
+            return {"running": False}
         except (OSError, HTTPException, ValueError) as exc:
             raise RemoteError("无法查询认证后台状态") from exc
 
@@ -59,18 +60,42 @@ class DaemonClient:
         return self.call({"action": "stop"}, start=False)
 
     def start(self):
-        if not self.status()["running"]:
-            self._start()
-        return self.status()
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            status = self._lifecycle_status()
+            if status is not None:
+                if not status["running"]:
+                    self._start()
+                    return self.status()
+                if status.get("accepting", True):
+                    return status
+            time.sleep(0.05)
+        raise RemoteError("认证后台启动超时")
+
+    def _lifecycle_status(self):
+        try:
+            return self.status()
+        except RemoteError as exc:
+            # A closing listener may reset a connection accepted during shutdown.
+            # Authentication/protocol errors must still reach the caller.
+            if isinstance(exc.__cause__, (OSError, HTTPException)):
+                return None
+            raise
+
+    def _wait_stopped(self):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            status = self._lifecycle_status()
+            if status is not None and not status["running"]:
+                return
+            time.sleep(0.05)
+        raise RemoteError("后台停止超时")
 
     def restart(self):
-        if self.status()["running"]:
-            self.stop()
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline and self.status()["running"]:
-                time.sleep(0.05)
-            if self.status()["running"]:
-                raise RemoteError("后台停止超时")
+        status = self._lifecycle_status()
+        if status is not None and status["running"] and status.get("accepting", True):
+            self.call({"action": "stop"}, start=False)
+        self._wait_stopped()
         return self.start()
 
     def execute(self, command, parameters, *, wait=None, wait_timeout=None):
@@ -124,9 +149,10 @@ class DaemonClient:
                 process.stdin.close()
         except OSError as exc:
             raise RemoteError("无法启动认证后台") from exc
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            if self.status()["running"]:
+            status = self._lifecycle_status()
+            if status is not None and status["running"] and status.get("accepting", True):
                 return
             time.sleep(0.05)
         raise RemoteError("认证后台启动超时")

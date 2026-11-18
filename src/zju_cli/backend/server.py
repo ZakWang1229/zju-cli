@@ -8,7 +8,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zju_cli.shared.config import Settings
 from zju_cli.shared.errors import RemoteError, ZjuError
-from zju_cli.shared.rpc import PROTOCOL, MAX_REQUEST, endpoint
+from zju_cli.shared.rpc import MAX_REQUEST, endpoint
 
 class RpcServer(ThreadingHTTPServer):
     daemon_threads = False
@@ -91,8 +91,6 @@ def serve(settings, *, handle_signals=False):
                 handler.close()
                 logger.removeHandler(handler)
         raise
-    from zju_cli.shared.runtime import runtime_dir
-    address_file = runtime_dir() / "address.json"
     previous_signals = {}
     if handle_signals:
         import signal
@@ -103,7 +101,6 @@ def serve(settings, *, handle_signals=False):
             previous_signals[signum] = signal.signal(signum, request_stop)
     try:
         with server:
-            address_file.write_text(json.dumps({"host": "127.0.0.1", "port": port, "protocol": PROTOCOL}), encoding="utf-8")
             server.serve_forever(poll_interval=0.2)
     finally:
         if previous_signals:
@@ -111,7 +108,6 @@ def serve(settings, *, handle_signals=False):
             for signum, previous in previous_signals.items():
                 signal.signal(signum, previous)
         app.close()
-        address_file.unlink(missing_ok=True)
         if logger is not None:
             for handler in logger.handlers[:]:
                 handler.close()

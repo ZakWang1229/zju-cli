@@ -47,16 +47,3 @@ class RecordStore:
         from contextlib import closing
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("UPDATE task_events SET exported=1 WHERE namespace=? AND id=?", (namespace,event_id))
-
-    def disable_periodic(self, task_id):
-        import sqlite3, json
-        from contextlib import closing
-        with closing(sqlite3.connect(self.database)) as connection, connection:
-            exists = connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='periodic_tasks'").fetchone()
-            if not exists:
-                return
-            row = connection.execute("SELECT document FROM periodic_tasks WHERE id=?", (task_id,)).fetchone()
-            if row:
-                document = json.loads(row[0])
-                document["enabled"] = False
-                connection.execute("UPDATE periodic_tasks SET document=? WHERE id=?", (json.dumps(document),task_id))

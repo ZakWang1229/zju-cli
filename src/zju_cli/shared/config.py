@@ -34,7 +34,6 @@ def read_dotenv(path: Path, *, required: bool = False) -> dict[str, str]:
 class Settings:
     username: str
     password: str = field(repr=False)
-    session_ttl_seconds: float = 900
     timeout_seconds: float = 30
     ffmpeg_bin: str = "ffmpeg"
     log_level: str = "INFO"
@@ -67,12 +66,11 @@ class Settings:
                 "~/.secrets/zju-cli/.env"
             )
         try:
-            ttl = float(value("ZJU_SESSION_TTL_MS", "900000")) / 1000
             request_timeout = timeout if timeout is not None else float(value("ZJU_HTTP_TIMEOUT", "30"))
-            if not all(math.isfinite(n) and n > 0 for n in (ttl, request_timeout)):
+            if not math.isfinite(request_timeout) or request_timeout <= 0:
                 raise ValueError
         except (ValueError, TypeError) as exc:
-            raise ConfigError("会话时长和 HTTP 超时必须是有限的正数") from exc
+            raise ConfigError("HTTP 超时必须是有限的正数") from exc
         level = value("ZJU_LOG_LEVEL", "INFO").upper()
         output = value("ZJU_LOG_OUTPUT", "file").lower()
         if level not in {"DEBUG", "INFO", "WARNING", "ERROR"} or output not in {"file", "stderr"}:
@@ -84,6 +82,16 @@ class Settings:
         zone = value("ZJU_LOG_TIMEZONE", "Asia/Shanghai")
         if zone not in {"Asia/Shanghai", "UTC"}:
             raise ConfigError("ZJU_LOG_TIMEZONE 必须是 Asia/Shanghai 或 UTC")
-        return cls(user, password, ttl, request_timeout, value("FFMPEG_BIN", "ffmpeg"),
-                   level, output, Path(log_dir).expanduser().absolute() if log_dir else None,
-                   value("CC98_USERNAME"), value("CC98_PASSWORD"), mode, zone)
+        return cls(
+            user,
+            password,
+            timeout_seconds=request_timeout,
+            ffmpeg_bin=value("FFMPEG_BIN", "ffmpeg"),
+            log_level=level,
+            log_output=output,
+            log_dir=Path(log_dir).expanduser().absolute() if log_dir else None,
+            cc98_username=value("CC98_USERNAME"),
+            cc98_password=value("CC98_PASSWORD"),
+            cc98_webvpn_mode=mode,
+            log_timezone=zone,
+        )
